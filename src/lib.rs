@@ -1,21 +1,17 @@
 use std::{
     hint::spin_loop,
     pin::Pin,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{atomic::AtomicUsize, Arc, Mutex},
     task::{Context, Poll, Wake, Waker},
 };
 
 use futures::{Future, Stream};
+use pin_project_lite::pin_project;
 
 fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
     // SAFETY: slice fields are pinned since the whole slice is pinned
     // <https://discord.com/channels/273534239310479360/818964227783262209/1035563044887072808>
     unsafe { slice.map_unchecked_mut(|futs| &mut futs[i]) }
-}
-
-pub struct ConcurrentProcessQueue<F> {
-    inner: Pin<Box<[Option<F>]>>,
-    sparse: Arc<AtomicSparseSet>,
 }
 
 #[derive(Debug)]
@@ -110,22 +106,51 @@ impl AtomicSparseSet {
     }
 }
 
+pub struct ConcurrentProcessQueue<F> {
+    inner: Pin<Box<[Task<F>]>>,
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    sparse: AtomicSparseSet,
+    waker: Mutex<Option<Waker>>,
+}
+
+pin_project!(
+    struct Task<F> {
+        #[pin]
+        slot: Option<F>,
+        waker: Arc<InnerWaker>,
+    }
+);
+
 impl<F> ConcurrentProcessQueue<F> {
     pub fn new(cap: usize) -> Self {
-        let mut v: Vec<Option<F>> = Vec::with_capacity(cap);
-        v.resize_with(cap, || None);
+        let shared = Arc::new(Shared {
+            sparse: AtomicSparseSet::new(cap),
+            waker: Mutex::new(None),
+        });
+
+        let mut v: Vec<Task<F>> = Vec::with_capacity(cap);
+        for i in 0..cap {
+            let waker = Arc::new(InnerWaker {
+                index: i,
+                shared: shared.clone(),
+            });
+            v.push(Task { slot: None, waker })
+        }
         Self {
             inner: v.into_boxed_slice().into(),
-            sparse: Arc::new(AtomicSparseSet::new(cap)),
+            shared,
         }
     }
     pub fn push(&mut self, fut: F) {
-        let mut inner: Pin<&mut [Option<F>]> = self.inner.as_mut();
+        let mut inner: Pin<&mut [Task<F>]> = self.inner.as_mut();
         for i in 0..inner.as_ref().len() {
-            let mut x = project_slice(inner.as_mut(), i);
-            if x.is_none() {
-                x.set(Some(fut));
-                self.sparse.push(i);
+            let mut x = project_slice(inner.as_mut(), i).project();
+            if x.slot.as_mut().is_none() {
+                x.slot.set(Some(fut));
+                self.shared.sparse.push(i);
                 break;
             }
         }
@@ -134,8 +159,7 @@ impl<F> ConcurrentProcessQueue<F> {
 
 struct InnerWaker {
     index: usize,
-    waker: Waker,
-    sparse: Arc<AtomicSparseSet>,
+    shared: Arc<Shared>,
 }
 impl Wake for InnerWaker {
     fn wake(self: std::sync::Arc<Self>) {
@@ -143,8 +167,10 @@ impl Wake for InnerWaker {
     }
     /// on wake, insert the future back into the queue, and then wake the original waker too
     fn wake_by_ref(self: &Arc<Self>) {
-        self.sparse.push(self.index);
-        self.waker.wake_by_ref();
+        self.shared.sparse.push(self.index);
+        if let Some(waker) = self.shared.waker.lock().unwrap().take() {
+            waker.wake()
+        }
     }
 }
 
@@ -152,31 +178,26 @@ impl<F: Future> Stream for ConcurrentProcessQueue<F> {
     type Item = F::Output;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        while let Some(i) = self.sparse.pop() {
-            // create the waker with the current waker and the queue. no future
-            let waker = Arc::new(InnerWaker {
-                index: i,
-                waker: cx.waker().clone(),
-                sparse: self.sparse.clone(),
-            })
-            .into();
+        *self.shared.waker.lock().unwrap() = Some(cx.waker().clone());
+        while let Some(i) = self.shared.sparse.pop() {
+            let mut inner = self.inner.as_mut();
+            let mut task = project_slice(inner.as_mut(), i).project();
+
+            let waker = task.waker.clone().into();
             let mut cx = Context::from_waker(&waker);
 
-            let mut inner = self.inner.as_mut();
-            let mut fut = project_slice(inner.as_mut(), i);
-
-            let res = match fut.as_mut().as_pin_mut() {
+            let res = match task.slot.as_mut().as_pin_mut() {
                 // poll the current task
                 Some(fut) => fut.poll(&mut cx),
                 None => continue,
             };
 
             if let Poll::Ready(x) = res {
-                fut.set(None);
+                task.slot.set(None);
                 return Poll::Ready(Some(x));
             }
         }
-        if self.inner.iter().filter_map(|x| x.as_ref()).count() == 0 {
+        if self.inner.iter().filter_map(|x| x.slot.as_ref()).count() == 0 {
             Poll::Ready(None)
         } else {
             Poll::Pending
