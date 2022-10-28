@@ -14,6 +14,10 @@ impl SparseSet {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     pub fn push(&mut self, x: usize) {
         let batch = self.set.len() / 2;
         if x >= batch || self.len == batch {

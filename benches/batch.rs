@@ -7,8 +7,8 @@ use hyper::{
 };
 use tokio::net::TcpStream;
 
-const BATCH: usize = 50;
-const TOTAL: usize = 50000;
+const BATCH: usize = 256;
+const TOTAL: usize = 512000;
 
 fn batch(c: &mut Criterion) {
     // setup a tokio runtime for our tests
@@ -36,10 +36,9 @@ fn batch(c: &mut Criterion) {
         rs.send_request(req)
     }
 
-    c.bench_function("ll_based", |b| {
+    let mut queue = FuturesUnordered::new();
+    c.bench_function("FuturesUnordered", |b| {
         b.iter(|| {
-            let mut queue = FuturesUnordered::new();
-
             for _ in 0..BATCH {
                 queue.push(make_req(&mut rs))
             }
@@ -53,10 +52,9 @@ fn batch(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("vec_based", |b| {
+    let mut queue = ConcurrentProcessQueue::new(BATCH);
+    c.bench_function("ConcurrentProcessQueue", |b| {
         b.iter(|| {
-            let mut queue = ConcurrentProcessQueue::new(BATCH);
-
             for _ in 0..BATCH {
                 queue.push(make_req(&mut rs)).map_err(drop).unwrap();
             }
@@ -67,6 +65,26 @@ fn batch(c: &mut Criterion) {
             for _ in 0..BATCH {
                 runtime.block_on(queue.next());
             }
+        })
+    });
+
+    c.bench_function("futures::join_all", |b| {
+        b.iter(|| {
+            let mut futs = Vec::new();
+            for _ in 0..BATCH * 8 {
+                futs.push(make_req(&mut rs))
+            }
+            runtime.block_on(futures::future::join_all(futs));
+        })
+    });
+
+    c.bench_function("crate::join_all", |b| {
+        b.iter(|| {
+            let mut futs = Vec::new();
+            for _ in 0..BATCH * 8 {
+                futs.push(make_req(&mut rs))
+            }
+            runtime.block_on(futures_buffered::join_all(futs));
         })
     });
 }
