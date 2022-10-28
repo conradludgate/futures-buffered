@@ -1,11 +1,11 @@
 use std::{
     hint::spin_loop,
     pin::Pin,
-    sync::{atomic::AtomicUsize, Arc, Mutex},
-    task::{Context, Poll, Wake, Waker},
+    sync::{atomic::AtomicUsize, Arc},
+    task::{Context, Poll, Wake},
 };
 
-use futures::{Future, Stream};
+use futures::{task::AtomicWaker, Future, Stream};
 use pin_project_lite::pin_project;
 
 fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
@@ -113,7 +113,7 @@ pub struct ConcurrentProcessQueue<F> {
 
 struct Shared {
     sparse: AtomicSparseSet,
-    waker: Mutex<Option<Waker>>,
+    waker: AtomicWaker,
 }
 
 pin_project!(
@@ -128,7 +128,7 @@ impl<F> ConcurrentProcessQueue<F> {
     pub fn new(cap: usize) -> Self {
         let shared = Arc::new(Shared {
             sparse: AtomicSparseSet::new(cap),
-            waker: Mutex::new(None),
+            waker: AtomicWaker::new(),
         });
 
         let mut v: Vec<Task<F>> = Vec::with_capacity(cap);
@@ -168,9 +168,7 @@ impl Wake for InnerWaker {
     /// on wake, insert the future back into the queue, and then wake the original waker too
     fn wake_by_ref(self: &Arc<Self>) {
         self.shared.sparse.push(self.index);
-        if let Some(waker) = self.shared.waker.lock().unwrap().take() {
-            waker.wake()
-        }
+        self.shared.waker.wake();
     }
 }
 
@@ -178,7 +176,7 @@ impl<F: Future> Stream for ConcurrentProcessQueue<F> {
     type Item = F::Output;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        *self.shared.waker.lock().unwrap() = Some(cx.waker().clone());
+        self.shared.waker.register(cx.waker());
         while let Some(i) = self.shared.sparse.pop() {
             let mut inner = self.inner.as_mut();
             let mut task = project_slice(inner.as_mut(), i).project();
