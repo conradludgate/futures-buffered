@@ -6,10 +6,6 @@ use std::{
 };
 
 use futures::{Future, Stream};
-use pin_project_lite::pin_project;
-
-const BATCH: usize = 10;
-const MASK: usize = (BATCH + 1).next_power_of_two();
 
 fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
     // SAFETY: slice fields are pinned since the whole slice is pinned
@@ -17,33 +13,41 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
     unsafe { slice.map_unchecked_mut(|futs| &mut futs[i]) }
 }
 
-pin_project!(
-    pub struct ConcurrentProcessQueue<F> {
-        #[pin]
-        inner: [Option<F>; BATCH],
-        sparse: Arc<AtomicSparseSet>,
-    }
-);
+pub struct ConcurrentProcessQueue<F> {
+    inner: Pin<Box<[Option<F>]>>,
+    sparse: Arc<AtomicSparseSet>,
+}
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AtomicSparseSet {
-    dense: [AtomicUsize; BATCH],
-    sparse: [AtomicUsize; BATCH],
+    /// max len is set.len() / 2
+    set: Box<[AtomicUsize]>,
     len: AtomicUsize,
 }
 
 impl AtomicSparseSet {
+    pub fn new(cap: usize) -> Self {
+        let mut v: Vec<AtomicUsize> = Vec::with_capacity(cap * 2);
+        v.resize_with(cap * 2, || AtomicUsize::new(0));
+        AtomicSparseSet {
+            set: v.into_boxed_slice(),
+            len: AtomicUsize::new(0),
+        }
+    }
+
     pub fn push(&self, x: usize) {
-        if x >= BATCH {
+        let batch = self.set.len() / 2;
+        let mask = (batch + 1).next_power_of_two();
+        if x >= batch {
             return;
         }
 
         let mut len = self.len.load(std::sync::atomic::Ordering::Acquire);
 
-        let sparse = self.sparse[x].load(std::sync::atomic::Ordering::Relaxed);
-        let dense = self.dense[sparse].load(std::sync::atomic::Ordering::Relaxed);
+        let sparse = self.set[x + batch].load(std::sync::atomic::Ordering::Relaxed);
+        let dense = self.set[sparse].load(std::sync::atomic::Ordering::Relaxed);
 
-        if sparse < (len & !MASK) && dense == x {
+        if sparse < (len & !mask) && dense == x {
             return;
         }
 
@@ -51,19 +55,19 @@ impl AtomicSparseSet {
             // claim the slot
             match self.len.compare_exchange_weak(
                 len,
-                len | MASK,
+                len | mask,
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,
             ) {
-                Ok(len) if len == BATCH => {
+                Ok(len) if len == batch => {
                     self.len.store(0, std::sync::atomic::Ordering::SeqCst);
                     return;
                 }
                 // we only claim the slot if len doesn't have the claim bit
-                Ok(len) if len & MASK == 0 => {
+                Ok(len) if len & mask == 0 => {
                     // this is our slot, there should be no sync happeneing here
-                    self.sparse[x].store(len, std::sync::atomic::Ordering::Release);
-                    self.dense[len].store(x, std::sync::atomic::Ordering::Release);
+                    self.set[batch + x].store(len, std::sync::atomic::Ordering::Release);
+                    self.set[len].store(x, std::sync::atomic::Ordering::Release);
                     self.len.store(len + 1, std::sync::atomic::Ordering::SeqCst);
                     break;
                 }
@@ -74,13 +78,16 @@ impl AtomicSparseSet {
         }
     }
     pub fn pop(&self) -> Option<usize> {
+        let batch = self.set.len() / 2;
+        let mask = (batch + 1).next_power_of_two();
+
         let mut len = self.len.load(std::sync::atomic::Ordering::Acquire);
 
         loop {
             // claim the slot
             match self.len.compare_exchange_weak(
                 len,
-                len | MASK,
+                len | mask,
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,
             ) {
@@ -89,9 +96,9 @@ impl AtomicSparseSet {
                     break None;
                 }
                 // we only claim the slot if len doesn't have the claim bit
-                Ok(len) if len & MASK == 0 => {
+                Ok(len) if len & mask == 0 => {
                     // this is our slot, there should be no sync happeneing here
-                    let x = self.dense[len - 1].load(std::sync::atomic::Ordering::Acquire);
+                    let x = self.set[len - 1].load(std::sync::atomic::Ordering::Acquire);
                     self.len.store(len - 1, std::sync::atomic::Ordering::SeqCst);
                     break Some(x);
                 }
@@ -104,15 +111,17 @@ impl AtomicSparseSet {
 }
 
 impl<F> ConcurrentProcessQueue<F> {
-    pub fn new() -> Self {
+    pub fn new(cap: usize) -> Self {
+        let mut v: Vec<Option<F>> = Vec::with_capacity(cap);
+        v.resize_with(cap, || None);
         Self {
-            inner: [(); BATCH].map(|()| None),
-            sparse: Arc::default(),
+            inner: v.into_boxed_slice().into(),
+            sparse: Arc::new(AtomicSparseSet::new(cap)),
         }
     }
-    pub fn push(mut self: Pin<&mut Self>, fut: F) {
-        let mut inner = self.as_mut().project().inner;
-        for i in 0..BATCH {
+    pub fn push(&mut self, fut: F) {
+        let mut inner: Pin<&mut [Option<F>]> = self.inner.as_mut();
+        for i in 0..inner.as_ref().len() {
             let mut x = project_slice(inner.as_mut(), i);
             if x.is_none() {
                 x.set(Some(fut));
@@ -123,9 +132,19 @@ impl<F> ConcurrentProcessQueue<F> {
     }
 }
 
-impl<F> Default for ConcurrentProcessQueue<F> {
-    fn default() -> Self {
-        Self::new()
+struct InnerWaker {
+    index: usize,
+    waker: Waker,
+    sparse: Arc<AtomicSparseSet>,
+}
+impl Wake for InnerWaker {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.wake_by_ref()
+    }
+    /// on wake, insert the future back into the queue, and then wake the original waker too
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.sparse.push(self.index);
+        self.waker.wake_by_ref();
     }
 }
 
@@ -133,53 +152,34 @@ impl<F: Future> Stream for ConcurrentProcessQueue<F> {
     type Item = F::Output;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.inner.iter().filter_map(|x| x.as_ref()).count() == 0 {
-            return Poll::Ready(None);
-        }
-        loop {
-            match self.sparse.pop() {
-                Some(i) => {
-                    struct InnerWaker {
-                        index: usize,
-                        waker: Waker,
-                        sparse: Arc<AtomicSparseSet>,
-                    }
-                    impl Wake for InnerWaker {
-                        fn wake(self: std::sync::Arc<Self>) {
-                            self.wake_by_ref()
-                        }
-                        /// on wake, insert the future back into the queue, and then wake the original waker too
-                        fn wake_by_ref(self: &Arc<Self>) {
-                            self.sparse.push(self.index);
-                            self.waker.wake_by_ref();
-                        }
-                    }
+        while let Some(i) = self.sparse.pop() {
+            // create the waker with the current waker and the queue. no future
+            let waker = Arc::new(InnerWaker {
+                index: i,
+                waker: cx.waker().clone(),
+                sparse: self.sparse.clone(),
+            })
+            .into();
+            let mut cx = Context::from_waker(&waker);
 
-                    // create the waker with the current waker and the queue. no future
-                    let waker = Arc::new(InnerWaker {
-                        index: i,
-                        waker: cx.waker().clone(),
-                        sparse: self.sparse.clone(),
-                    })
-                    .into();
-                    let mut cx = Context::from_waker(&waker);
+            let mut inner = self.inner.as_mut();
+            let mut fut = project_slice(inner.as_mut(), i);
 
-                    let mut inner = self.as_mut().project().inner;
-                    let mut fut = project_slice(inner.as_mut(), i);
+            let res = match fut.as_mut().as_pin_mut() {
+                // poll the current task
+                Some(fut) => fut.poll(&mut cx),
+                None => continue,
+            };
 
-                    let res = match fut.as_mut().as_pin_mut() {
-                        // poll the current task
-                        Some(fut) => fut.poll(&mut cx),
-                        None => continue,
-                    };
-
-                    if let Poll::Ready(x) = res {
-                        fut.set(None);
-                        break Poll::Ready(Some(x));
-                    }
-                }
-                None => break Poll::Pending,
+            if let Poll::Ready(x) = res {
+                fut.set(None);
+                return Poll::Ready(Some(x));
             }
+        }
+        if self.inner.iter().filter_map(|x| x.as_ref()).count() == 0 {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
         }
     }
 }
@@ -193,19 +193,16 @@ mod tests {
         time::Duration,
     };
 
-    use futures::{pin_mut, Future, StreamExt};
+    use futures::{Future, StreamExt};
     use pin_project_lite::pin_project;
     use tokio::time::Sleep;
 
-    use crate::{ConcurrentProcessQueue, BATCH};
+    use crate::ConcurrentProcessQueue;
 
     #[tokio::test]
     async fn single() {
-        let buffer = ConcurrentProcessQueue::new();
-        pin_mut!(buffer);
-        buffer
-            .as_mut()
-            .push(tokio::time::sleep(Duration::from_secs(1)));
+        let mut buffer = ConcurrentProcessQueue::new(10);
+        buffer.push(tokio::time::sleep(Duration::from_secs(1)));
         buffer.next().await;
     }
 
@@ -235,23 +232,22 @@ mod tests {
             }
         }
 
-        let buffer = ConcurrentProcessQueue::new();
-        pin_mut!(buffer);
+        let mut buffer = ConcurrentProcessQueue::new(10);
         // build up
-        for i in 0..BATCH {
-            buffer.as_mut().push(wait(&poll_count, i));
+        for i in 0..10 {
+            buffer.push(wait(&poll_count, i));
         }
         // poll and insert
         for i in 0..100 {
             assert!(buffer.next().await.is_some());
-            buffer.as_mut().push(wait(&poll_count, i));
+            buffer.push(wait(&poll_count, i));
         }
         // drain down
-        for _ in 0..BATCH {
+        for _ in 0..10 {
             assert!(buffer.next().await.is_some());
         }
 
         let count = poll_count.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(count, (100 + BATCH) * 2);
+        assert_eq!(count, 220);
     }
 }
