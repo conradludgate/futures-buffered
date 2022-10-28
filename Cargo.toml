@@ -11,3 +11,9 @@ pin-project-lite = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros"] }
+hyper = { version = "0.14", features = ["client", "http2", "tcp"] }
+criterion = { version = "0.4" }
+
+[[bench]]
+name = "batch"
+harness = false
