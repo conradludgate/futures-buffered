@@ -11,6 +11,12 @@ use pin_project_lite::pin_project;
 const BATCH: usize = 10;
 const MASK: usize = (BATCH + 1).next_power_of_two();
 
+fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
+    // SAFETY: slice fields are pinned since the whole slice is pinned
+    // <https://discord.com/channels/273534239310479360/818964227783262209/1035563044887072808>
+    unsafe { slice.map_unchecked_mut(|futs| &mut futs[i]) }
+}
+
 pin_project!(
     pub struct ConcurrentProcessQueue<F> {
         #[pin]
@@ -104,10 +110,12 @@ impl<F> ConcurrentProcessQueue<F> {
             sparse: Arc::default(),
         }
     }
-    pub fn push(&mut self, fut: F) {
-        for (i, x) in self.inner.iter_mut().enumerate() {
+    pub fn push(mut self: Pin<&mut Self>, fut: F) {
+        let mut inner = self.as_mut().project().inner;
+        for i in 0..BATCH {
+            let mut x = project_slice(inner.as_mut(), i);
             if x.is_none() {
-                *x = Some(fut);
+                x.set(Some(fut));
                 self.sparse.push(i);
                 break;
             }
@@ -121,7 +129,7 @@ impl<F> Default for ConcurrentProcessQueue<F> {
     }
 }
 
-impl<F: Unpin + Future + Send> Stream for ConcurrentProcessQueue<F> {
+impl<F: Future> Stream for ConcurrentProcessQueue<F> {
     type Item = F::Output;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -156,14 +164,17 @@ impl<F: Unpin + Future + Send> Stream for ConcurrentProcessQueue<F> {
                     .into();
                     let mut cx = Context::from_waker(&waker);
 
-                    let fut = match &mut self.inner[i] {
-                        Some(fut) => fut,
+                    let mut inner = self.as_mut().project().inner;
+                    let mut fut = project_slice(inner.as_mut(), i);
+
+                    let res = match fut.as_mut().as_pin_mut() {
+                        // poll the current task
+                        Some(fut) => fut.poll(&mut cx),
                         None => continue,
                     };
 
-                    // poll the current task
-                    if let Poll::Ready(x) = Pin::new(fut).poll(&mut cx) {
-                        self.inner[i] = None;
+                    if let Poll::Ready(x) = res {
+                        fut.set(None);
                         break Poll::Ready(Some(x));
                     }
                 }
@@ -182,15 +193,19 @@ mod tests {
         time::Duration,
     };
 
-    use futures::{future::BoxFuture, Future, StreamExt};
+    use futures::{pin_mut, Future, StreamExt};
     use pin_project_lite::pin_project;
+    use tokio::time::Sleep;
 
     use crate::{ConcurrentProcessQueue, BATCH};
 
     #[tokio::test]
     async fn single() {
-        let mut buffer = ConcurrentProcessQueue::new();
-        buffer.push(Box::pin(tokio::time::sleep(Duration::from_secs(1))));
+        let buffer = ConcurrentProcessQueue::new();
+        pin_mut!(buffer);
+        buffer
+            .as_mut()
+            .push(tokio::time::sleep(Duration::from_secs(1)));
         buffer.next().await;
     }
 
@@ -213,24 +228,23 @@ mod tests {
             }
         }
 
-        fn wait(poll_count: &Arc<AtomicUsize>, i: usize) -> PollCounter<BoxFuture<'static, ()>> {
+        fn wait(poll_count: &Arc<AtomicUsize>, i: usize) -> PollCounter<Sleep> {
             PollCounter {
                 count: poll_count.clone(),
-                inner: Box::pin(tokio::time::sleep(
-                    Duration::from_secs(1) / (i as u32 % 10 + 5),
-                )),
+                inner: tokio::time::sleep(Duration::from_secs(1) / (i as u32 % 10 + 5)),
             }
         }
 
-        let mut buffer = ConcurrentProcessQueue::new();
+        let buffer = ConcurrentProcessQueue::new();
+        pin_mut!(buffer);
         // build up
         for i in 0..BATCH {
-            buffer.push(wait(&poll_count, i));
+            buffer.as_mut().push(wait(&poll_count, i));
         }
         // poll and insert
         for i in 0..100 {
             assert!(buffer.next().await.is_some());
-            buffer.push(wait(&poll_count, i));
+            buffer.as_mut().push(wait(&poll_count, i));
         }
         // drain down
         for _ in 0..BATCH {
