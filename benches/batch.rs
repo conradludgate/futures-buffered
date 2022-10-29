@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use futures_util::{stream::FuturesUnordered, StreamExt};
 use futures_buffered::FuturesUnorderedBounded;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use hyper::{
     client::conn::{self, ResponseFuture, SendRequest},
     Body, Request,

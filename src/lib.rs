@@ -15,7 +15,7 @@
 //! Running 512000 http requests (over an already establish HTTP2 connection) with 256 concurrent jobs
 //! in a single threaded tokio runtime:
 //!
-//! ```
+//! ```text
 //! FuturesUnordered         time:   [220.20 ms 220.97 ms 221.80 ms]
 //! FuturesUnorderedBounded  time:   [208.73 ms 209.26 ms 209.86 ms]
 //! ```
@@ -28,7 +28,7 @@
 //! - alloc: the number of cumulative bytes allocated
 //! - dealloc: the number of cumulative bytes deallocated
 //!
-//! ```
+//! ```text
 //! FuturesUnordered
 //!     count:    1024002
 //!     alloc:    36864136 B
@@ -47,14 +47,19 @@
 //!
 //! # Example
 //! ```
+//! use futures::stream::StreamExt;
+//! use futures_buffered::FuturesUnorderedBounded;
+//! use hyper::{client::conn::{handshake, ResponseFuture, SendRequest}, Body, Request };
+//! use tokio::net::TcpStream;
+//!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // create a tcp connection
 //! let stream = TcpStream::connect("example.com:80").await?;
 //!
 //! // perform the http handshakes
-//! let (mut rs, conn) = conn::handshake(stream).await?;
-//! runtime.spawn(conn);
+//! let (mut rs, conn) = handshake(stream).await?;
+//! tokio::spawn(conn);
 //!
 //! /// make http request to example.com and read the response
 //! fn make_req(rs: &mut SendRequest<Body>) -> ResponseFuture {
@@ -121,7 +126,7 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 /// Running 512000 http requests (over an already establish HTTP2 connection) with 256 concurrent jobs
 /// in a single threaded tokio runtime:
 ///
-/// ```
+/// ```text
 /// FuturesUnordered         time:   [220.20 ms 220.97 ms 221.80 ms]
 /// FuturesUnorderedBounded  time:   [208.73 ms 209.26 ms 209.86 ms]
 /// ```
@@ -134,7 +139,7 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 /// - alloc: the number of cumulative bytes allocated
 /// - dealloc: the number of cumulative bytes deallocated
 ///
-/// ```
+/// ```text
 /// FuturesUnordered
 ///     count:    1024002
 ///     alloc:    36864136 B
@@ -152,15 +157,23 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 /// Perfect for if you want a fixed batch size
 ///
 /// # Example
+///
+/// Making 1024 total HTTP requests, with a max concurrency of 128
+///
 /// ```
+/// use futures::stream::StreamExt;
+/// use futures_buffered::FuturesUnorderedBounded;
+/// use hyper::{client::conn::{handshake, ResponseFuture, SendRequest}, Body, Request };
+/// use tokio::net::TcpStream;
+///
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // create a tcp connection
 /// let stream = TcpStream::connect("example.com:80").await?;
 ///
 /// // perform the http handshakes
-/// let (mut rs, conn) = conn::handshake(stream).await?;
-/// runtime.spawn(conn);
+/// let (mut rs, conn) = handshake(stream).await?;
+/// tokio::spawn(conn);
 ///
 /// /// make http request to example.com and read the response
 /// fn make_req(rs: &mut SendRequest<Body>) -> ResponseFuture {
@@ -265,10 +278,7 @@ impl<F> FuturesUnorderedBounded<F> {
 }
 
 impl<F: Future> FuturesUnorderedBounded<F> {
-    fn poll_inner(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<(usize, F::Output)>> {
+    fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
         self.shared.waker.register(cx.waker());
         while let Some(i) = self.shared.ready.pop() {
             let mut inner = self.inner.as_mut();
@@ -300,7 +310,7 @@ impl<F: Future> FuturesUnorderedBounded<F> {
 impl<F: Future> Stream for FuturesUnorderedBounded<F> {
     type Item = F::Output;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.poll_inner(cx) {
             Poll::Ready(Some((_, x))) => Poll::Ready(Some(x)),
             Poll::Ready(None) => Poll::Ready(None),
@@ -321,7 +331,7 @@ struct InnerWaker {
 
 impl Wake for InnerWaker {
     fn wake(self: std::sync::Arc<Self>) {
-        self.wake_by_ref()
+        self.wake_by_ref();
     }
     /// on wake, insert the future index into the queue, and then wake the original waker too
     fn wake_by_ref(self: &Arc<Self>) {
@@ -331,14 +341,14 @@ impl Wake for InnerWaker {
         }
     }
 }
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+/// Future for the [`join_all`] function.
+pub struct JoinAll<F: Future> {
+    queue: FuturesUnorderedBounded<F>,
+    output: Box<[MaybeUninit<F::Output>]>,
+}
 
-pin_project!(
-    pub struct JoinAll<F: Future> {
-        #[pin]
-        queue: FuturesUnorderedBounded<F>,
-        output: Box<[MaybeUninit<F::Output>]>,
-    }
-);
+impl<F: Future> Unpin for JoinAll<F> {}
 
 /// Creates a future which represents a collection of the outputs of the futures
 /// given.
@@ -398,6 +408,9 @@ where
     for (i, task) in v.iter_mut().enumerate() {
         slots.push(i);
         shared.ready.push(i);
+
+        // we know that we haven't cloned this arc before since it was created
+        // just a few lines above
         Arc::get_mut(&mut task.waker).unwrap().shared = Arc::downgrade(&shared);
     }
 
@@ -423,7 +436,7 @@ impl<F: Future> Future for JoinAll<F> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
-            match self.as_mut().project().queue.poll_inner(cx) {
+            match self.as_mut().queue.poll_inner(cx) {
                 Poll::Ready(Some((i, x))) => {
                     self.output[i].write(x);
                 }
@@ -449,7 +462,7 @@ impl<F: Future> Future for JoinAll<F> {
     }
 }
 
-impl<T: ?Sized> BufferedStreamExt for T where T: Stream {}
+impl<T: ?Sized + Stream> BufferedStreamExt for T {}
 
 /// An extension trait for `Stream`s that provides a variety of convenient
 /// combinator functions.
@@ -541,11 +554,10 @@ where
                 }
             }
         }
-        while this.in_progress_queue.len() < this.in_progress_queue.capacity() {}
 
         // Attempt to pull the next value from the in_progress_queue
         match this.in_progress_queue.poll_next_unpin(cx) {
-            x @ Poll::Pending | x @ Poll::Ready(Some(_)) => return x,
+            x @ (Poll::Pending | Poll::Ready(Some(_))) => return x,
             Poll::Ready(None) => {}
         }
 
@@ -686,5 +698,26 @@ mod tests {
 
         let count = c.into_inner();
         assert_eq!(count, 220);
+    }
+
+    #[tokio::test]
+    async fn buffered_unordered() {
+        use crate::BufferedStreamExt;
+        use futures::channel::oneshot;
+        use futures::stream::{self, StreamExt};
+
+        let (send_one, recv_one) = oneshot::channel();
+        let (send_two, recv_two) = oneshot::channel();
+
+        let stream_of_futures = stream::iter(vec![recv_one, recv_two]);
+        let mut buffered = stream_of_futures.buffered_unordered(10);
+
+        send_two.send(2i32).unwrap();
+        assert_eq!(buffered.next().await, Some(Ok(2i32)));
+
+        send_one.send(1i32).unwrap();
+        assert_eq!(buffered.next().await, Some(Ok(1i32)));
+
+        assert_eq!(buffered.next().await, None);
     }
 }

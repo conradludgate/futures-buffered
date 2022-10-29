@@ -53,10 +53,9 @@ impl AtomicSparseSet {
                     self.len.store(len + 1, std::sync::atomic::Ordering::SeqCst);
                     break;
                 }
-                Ok(l) => len = l,
-                Err(l) => len = l,
+                Ok(l) | Err(l) => len = l,
             }
-            spin_loop()
+            spin_loop();
         }
     }
     pub fn pop(&self) -> Option<usize> {
@@ -84,10 +83,9 @@ impl AtomicSparseSet {
                     self.len.store(len - 1, std::sync::atomic::Ordering::SeqCst);
                     break Some(x);
                 }
-                Ok(l) => len = l,
-                Err(l) => len = l,
+                Ok(l) | Err(l) => len = l,
             }
-            spin_loop()
+            spin_loop();
         }
     }
 }
