@@ -1,11 +1,11 @@
 //! # futures-buffered
 //!
-//! This project provides a single future structure: `ConcurrentProcessQueue`.
+//! This project provides a single future structure: `FuturesUnorderedBounded`.
 //!
 //! Much like [`futures::stream::FuturesUnordered`](https://docs.rs/futures/0.3.25/futures/stream/struct.FuturesUnordered.html),
 //! this is a thread-safe, `Pin` friendly, lifetime friendly, concurrent processing stream.
 //!
-//! The is different to `FuturesUnordered` in that `ConcurrentProcessQueue` has a fixed capacity for processing count.
+//! The is different to `FuturesUnordered` in that `FuturesUnorderedBounded` has a fixed capacity for processing count.
 //! This means it's less flexible, but produces better memory efficiency.
 //!
 //! ## Benchmarks
@@ -16,8 +16,8 @@
 //! in a single threaded tokio runtime:
 //!
 //! ```
-//! FuturesUnordered        time:   [220.20 ms 220.97 ms 221.80 ms]
-//! ConcurrentProcessQueue  time:   [208.73 ms 209.26 ms 209.86 ms]
+//! FuturesUnordered         time:   [220.20 ms 220.97 ms 221.80 ms]
+//! FuturesUnorderedBounded  time:   [208.73 ms 209.26 ms 209.86 ms]
 //! ```
 //!
 //! ### Memory usage
@@ -34,7 +34,7 @@
 //!     alloc:    36864136 B
 //!     dealloc:  36864000 B
 //!
-//! ConcurrentProcessQueue
+//! FuturesUnorderedBounded
 //!     count:    260
 //!     alloc:    20544 B
 //!     dealloc:  0 B
@@ -42,7 +42,7 @@
 //!
 //! ### Conclusion
 //!
-//! As you can see, `ConcurrentProcessQueue` massively reduces you memory overhead while providing a small performance gain.
+//! As you can see, `FuturesUnorderedBounded` massively reduces you memory overhead while providing a small performance gain.
 //! Perfect for if you want a fixed batch size
 //!
 //! # Example
@@ -67,7 +67,7 @@
 //! }
 //!
 //! // create a queue that can hold 128 concurrent requests
-//! let mut queue = ConcurrentProcessQueue::new(128);
+//! let mut queue = FuturesUnorderedBounded::new(128);
 //!
 //! // start up 128 requests
 //! for _ in 0..128 {
@@ -85,6 +85,7 @@
 //! # Ok(()) }
 //! ```
 use std::{
+    future::Future,
     mem::MaybeUninit,
     pin::Pin,
     sync::{Arc, Weak},
@@ -92,7 +93,7 @@ use std::{
 };
 
 use atomic_sparse::AtomicSparseSet;
-use futures::{task::AtomicWaker, Future, Stream};
+use futures_util::{stream::Fuse, task::AtomicWaker, Stream, StreamExt};
 use pin_project_lite::pin_project;
 use sparse::SparseSet;
 
@@ -110,7 +111,7 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 /// Much like [`futures::stream::FuturesUnordered`](https://docs.rs/futures/0.3.25/futures/stream/struct.FuturesUnordered.html),
 /// this is a thread-safe, `Pin` friendly, lifetime friendly, concurrent processing stream.
 ///
-/// The is different to `FuturesUnordered` in that `ConcurrentProcessQueue` has a fixed capacity for processing count.
+/// The is different to `FuturesUnordered` in that `FuturesUnorderedBounded` has a fixed capacity for processing count.
 /// This means it's less flexible, but produces better memory efficiency.
 ///
 /// ## Benchmarks
@@ -121,8 +122,8 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 /// in a single threaded tokio runtime:
 ///
 /// ```
-/// FuturesUnordered        time:   [220.20 ms 220.97 ms 221.80 ms]
-/// ConcurrentProcessQueue  time:   [208.73 ms 209.26 ms 209.86 ms]
+/// FuturesUnordered         time:   [220.20 ms 220.97 ms 221.80 ms]
+/// FuturesUnorderedBounded  time:   [208.73 ms 209.26 ms 209.86 ms]
 /// ```
 ///
 /// ### Memory usage
@@ -139,7 +140,7 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 ///     alloc:    36864136 B
 ///     dealloc:  36864000 B
 ///
-/// ConcurrentProcessQueue
+/// FuturesUnorderedBounded
 ///     count:    260
 ///     alloc:    20544 B
 ///     dealloc:  0 B
@@ -147,7 +148,7 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 ///
 /// ### Conclusion
 ///
-/// As you can see, `ConcurrentProcessQueue` massively reduces you memory overhead while providing a small performance gain.
+/// As you can see, `FuturesUnorderedBounded` massively reduces you memory overhead while providing a small performance gain.
 /// Perfect for if you want a fixed batch size
 ///
 /// # Example
@@ -172,7 +173,7 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 /// }
 ///
 /// // create a queue that can hold 128 concurrent requests
-/// let mut queue = ConcurrentProcessQueue::new(128);
+/// let mut queue = FuturesUnorderedBounded::new(128);
 ///
 /// // start up 128 requests
 /// for _ in 0..128 {
@@ -189,11 +190,12 @@ fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
 /// }
 /// # Ok(()) }
 /// ```
-pub struct ConcurrentProcessQueue<F> {
+pub struct FuturesUnorderedBounded<F> {
     slots: SparseSet,
     inner: Pin<Box<[Task<F>]>>,
     shared: Arc<Shared>,
 }
+impl<F> Unpin for FuturesUnorderedBounded<F> {}
 
 struct Shared {
     ready: AtomicSparseSet,
@@ -208,7 +210,7 @@ pin_project!(
     }
 );
 
-impl<F> ConcurrentProcessQueue<F> {
+impl<F> FuturesUnorderedBounded<F> {
     pub fn new(cap: usize) -> Self {
         // create the shared data that is part of the queue and
         // the wakers
@@ -251,9 +253,18 @@ impl<F> ConcurrentProcessQueue<F> {
             Err(fut)
         }
     }
+    pub fn is_empty(&self) -> bool {
+        self.inner.len() == self.slots.len()
+    }
+    pub fn len(&self) -> usize {
+        self.inner.len() - self.slots.len()
+    }
+    pub fn capacity(&self) -> usize {
+        self.inner.len()
+    }
 }
 
-impl<F: Future> ConcurrentProcessQueue<F> {
+impl<F: Future> FuturesUnorderedBounded<F> {
     fn poll_inner(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -286,7 +297,7 @@ impl<F: Future> ConcurrentProcessQueue<F> {
     }
 }
 
-impl<F: Future> Stream for ConcurrentProcessQueue<F> {
+impl<F: Future> Stream for FuturesUnorderedBounded<F> {
     type Item = F::Output;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -298,7 +309,7 @@ impl<F: Future> Stream for ConcurrentProcessQueue<F> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.inner.len() - self.slots.len();
+        let len = self.len();
         (len, Some(len))
     }
 }
@@ -324,7 +335,7 @@ impl Wake for InnerWaker {
 pin_project!(
     pub struct JoinAll<F: Future> {
         #[pin]
-        queue: ConcurrentProcessQueue<F>,
+        queue: FuturesUnorderedBounded<F>,
         output: Box<[MaybeUninit<F::Output>]>,
     }
 );
@@ -391,7 +402,7 @@ where
     }
 
     // create the queue
-    let queue = ConcurrentProcessQueue {
+    let queue = FuturesUnorderedBounded {
         inner: v.into_boxed_slice().into(),
         shared,
         slots,
@@ -438,29 +449,140 @@ impl<F: Future> Future for JoinAll<F> {
     }
 }
 
+impl<T: ?Sized> BufferedStreamExt for T where T: Stream {}
+
+/// An extension trait for `Stream`s that provides a variety of convenient
+/// combinator functions.
+pub trait BufferedStreamExt: Stream {
+    /// An adaptor for creating a buffered list of pending futures (unordered).
+    ///
+    /// If this stream's item can be converted into a future, then this adaptor
+    /// will buffer up to `n` futures and then return the outputs in the order
+    /// in which they complete. No more than `n` futures will be buffered at
+    /// any point in time, and less than `n` may also be buffered depending on
+    /// the state of each future.
+    ///
+    /// The returned stream will be a stream of each future's output.
+    ///
+    /// This method is only available when the `std` or `alloc` feature of this
+    /// library is activated, and it is activated by default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use futures::channel::oneshot;
+    /// use futures::stream::{self, StreamExt};
+    /// use futures_buffered::BufferedStreamExt;
+    ///
+    /// let (send_one, recv_one) = oneshot::channel();
+    /// let (send_two, recv_two) = oneshot::channel();
+    ///
+    /// let stream_of_futures = stream::iter(vec![recv_one, recv_two]);
+    /// let mut buffered = stream_of_futures.buffered_unordered(10);
+    ///
+    /// send_two.send(2i32)?;
+    /// assert_eq!(buffered.next().await, Some(Ok(2i32)));
+    ///
+    /// send_one.send(1i32)?;
+    /// assert_eq!(buffered.next().await, Some(Ok(1i32)));
+    ///
+    /// assert_eq!(buffered.next().await, None);
+    /// # Ok::<(), i32>(()) }).unwrap();
+    /// ```
+    fn buffered_unordered(self, n: usize) -> BufferUnordered<Self>
+    where
+        Self::Item: Future,
+        Self: Sized,
+    {
+        BufferUnordered {
+            stream: StreamExt::fuse(self),
+            in_progress_queue: FuturesUnorderedBounded::new(n),
+        }
+    }
+}
+
+pin_project!(
+    /// Stream for the [`buffered_unordered`](BufferedStreamExt::buffered_unordered)
+    /// method.
+    #[must_use = "streams do nothing unless polled"]
+    pub struct BufferUnordered<S: Stream> {
+        #[pin]
+        stream: Fuse<S>,
+        in_progress_queue: FuturesUnorderedBounded<S::Item>,
+    }
+);
+
+impl<St> Stream for BufferUnordered<St>
+where
+    St: Stream,
+    St::Item: Future,
+{
+    type Item = <St::Item as Future>::Output;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
+        // First up, try to spawn off as many futures as possible by filling up
+        // our queue of futures.
+
+        while let Some(i) = this.in_progress_queue.slots.pop() {
+            match this.stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(fut)) => {
+                    project_slice(this.in_progress_queue.inner.as_mut(), i)
+                        .project()
+                        .slot
+                        .set(Some(fut));
+                    this.in_progress_queue.shared.ready.push(i);
+                }
+                Poll::Ready(None) | Poll::Pending => {
+                    this.in_progress_queue.slots.push(i);
+                    break;
+                }
+            }
+        }
+        while this.in_progress_queue.len() < this.in_progress_queue.capacity() {}
+
+        // Attempt to pull the next value from the in_progress_queue
+        match this.in_progress_queue.poll_next_unpin(cx) {
+            x @ Poll::Pending | x @ Poll::Ready(Some(_)) => return x,
+            Poll::Ready(None) => {}
+        }
+
+        // If more values are still coming from the stream, we're not done yet
+        if this.stream.is_done() {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let queue_len = self.in_progress_queue.len();
+        let (lower, upper) = self.stream.size_hint();
+        let lower = lower.saturating_add(queue_len);
+        let upper = match upper {
+            Some(x) => x.checked_add(queue_len),
+            None => None,
+        };
+        (lower, upper)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         cell::Cell,
         pin::Pin,
         task::{Context, Poll},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use futures::{Future, StreamExt};
     use pin_project_lite::pin_project;
     use tokio::time::Sleep;
 
-    use crate::ConcurrentProcessQueue;
-
-    #[tokio::test]
-    async fn single() {
-        let mut buffer = ConcurrentProcessQueue::new(10);
-        buffer
-            .push(tokio::time::sleep(Duration::from_secs(1)))
-            .unwrap();
-        buffer.next().await;
-    }
+    use crate::FuturesUnorderedBounded;
 
     pin_project!(
         struct PollCounter<'c, F> {
@@ -478,18 +600,36 @@ mod tests {
         }
     }
 
-    fn wait(count: &Cell<usize>, i: usize) -> PollCounter<'_, Sleep> {
+    fn sleep(count: &Cell<usize>, dur: Duration) -> PollCounter<'_, Sleep> {
         PollCounter {
             count,
-            inner: tokio::time::sleep(Duration::from_secs(1) / (i as u32 % 10 + 5)),
+            inner: tokio::time::sleep(dur),
         }
     }
 
     #[tokio::test]
-    async fn multi() {
+    async fn single() {
         let c = Cell::new(0);
 
-        let mut buffer = ConcurrentProcessQueue::new(10);
+        let mut buffer = FuturesUnorderedBounded::new(10);
+        buffer
+            .push(sleep(&c, Duration::from_secs(1)))
+            .map_err(drop)
+            .unwrap();
+        buffer.next().await;
+
+        assert_eq!(c.into_inner(), 2);
+    }
+
+    #[tokio::test]
+    async fn multi() {
+        fn wait(count: &Cell<usize>, i: usize) -> PollCounter<'_, Sleep> {
+            sleep(count, Duration::from_secs(1) / (i as u32 % 10 + 5))
+        }
+
+        let c = Cell::new(0);
+
+        let mut buffer = FuturesUnorderedBounded::new(10);
         // build up
         for i in 0..10 {
             buffer.push(wait(&c, i)).map_err(drop).unwrap();
@@ -503,6 +643,46 @@ mod tests {
         for _ in 0..10 {
             assert!(buffer.next().await.is_some());
         }
+
+        let count = c.into_inner();
+        assert_eq!(count, 220);
+    }
+
+    #[tokio::test]
+    async fn very_slow_task() {
+        let c = Cell::new(0);
+
+        let now = Instant::now();
+
+        let mut buffer = FuturesUnorderedBounded::new(10);
+        // build up
+        for _ in 0..9 {
+            buffer
+                .push(sleep(&c, Duration::from_millis(10)))
+                .map_err(drop)
+                .unwrap();
+        }
+        // spawn a slow future among a bunch of fast ones.
+        // the test is to make sure this doesn't block the rest getting completed
+        buffer
+            .push(sleep(&c, Duration::from_secs(2)))
+            .map_err(drop)
+            .unwrap();
+        // poll and insert
+        for _ in 0..100 {
+            assert!(buffer.next().await.is_some());
+            buffer
+                .push(sleep(&c, Duration::from_millis(10)))
+                .map_err(drop)
+                .unwrap();
+        }
+        // drain down
+        for _ in 0..10 {
+            assert!(buffer.next().await.is_some());
+        }
+
+        let dur = now.elapsed();
+        assert!(dur < Duration::from_millis(2050));
 
         let count = c.into_inner();
         assert_eq!(count, 220);
