@@ -104,7 +104,7 @@ mod atomic_sparse;
 mod buffered_unordered;
 mod futures_unordered_bounded;
 mod join_all;
-mod sparse;
+// mod sparse;
 mod try_join_all;
 
 pub use buffered_unordered::{BufferUnordered, BufferedStreamExt};
@@ -135,7 +135,7 @@ impl Wake for InnerWaker {
     /// on wake, insert the future index into the queue, and then wake the original waker too
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(shared) = self.shared.upgrade() {
-            shared.ready.push(self.index);
+            shared.ready.push_sync(self.index);
             shared.waker.wake();
         }
     }

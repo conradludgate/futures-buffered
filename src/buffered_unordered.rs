@@ -93,7 +93,7 @@ where
                         .project()
                         .slot
                         .set(Some(fut));
-                    this.in_progress_queue.shared.ready.push(i);
+                    this.in_progress_queue.shared.ready.push_sync(i);
                 }
                 Poll::Ready(None) | Poll::Pending => {
                     this.in_progress_queue.slots.push(i);

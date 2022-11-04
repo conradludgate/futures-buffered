@@ -4,8 +4,9 @@ version = "0.2.0"
 edition = "2021"
 description = "future concurrency primitives with emphasis on performance and low memory usage"
 license = "MIT"
-repository = "https://github.com/conradludgate/futues-buffered"
+repository = "https://github.com/conradludgate/futures-buffered"
 authors = ["Conrad Ludgate <conradludgate@gmail.com"]
+categories = ["asynchronous"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

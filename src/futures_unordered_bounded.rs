@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::sparse::SparseSet;
+// use crate::sparse::SparseSet;
 use crate::{atomic_sparse::AtomicSparseSet, project_slice, InnerWaker, Shared};
 use futures_util::{task::AtomicWaker, Stream};
 use pin_project_lite::pin_project;
@@ -103,7 +103,7 @@ use pin_project_lite::pin_project;
 /// # Ok(()) }
 /// ```
 pub struct FuturesUnorderedBounded<F> {
-    pub(crate) slots: SparseSet,
+    pub(crate) slots: AtomicSparseSet,
     pub(crate) inner: Pin<Box<[Task<F>]>>,
     pub(crate) shared: Arc<Shared>,
 }
@@ -133,7 +133,7 @@ impl<F> FuturesUnorderedBounded<F> {
 
         // create the task buffer + slot stack
         let mut v: Vec<Task<F>> = Vec::with_capacity(cap);
-        let mut slots = SparseSet::new(cap);
+        let mut slots = AtomicSparseSet::new(cap);
         for i in 0..cap {
             let waker = Arc::new(InnerWaker {
                 index: i,
@@ -183,7 +183,7 @@ impl<F> FuturesUnorderedBounded<F> {
                 .project()
                 .slot
                 .set(Some(fut));
-            self.shared.ready.push(i);
+            self.shared.ready.push_sync(i);
             Ok(())
         } else {
             // if no slots, return back the future
@@ -212,7 +212,7 @@ impl<F> FuturesUnorderedBounded<F> {
 impl<F: Future> FuturesUnorderedBounded<F> {
     pub(crate) fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
         self.shared.waker.register(cx.waker());
-        while let Some(i) = self.shared.ready.pop() {
+        while let Some(i) = self.shared.ready.pop_sync() {
             let mut inner = self.inner.as_mut();
             let mut task = project_slice(inner.as_mut(), i).project();
 
@@ -258,7 +258,7 @@ impl<F: Future> Stream for FuturesUnorderedBounded<F> {
 
 impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
     /// Constructs a new, empty [`FuturesUnorderedBounded`] with a fixed capacity that is the length of the iterator.
-    /// 
+    ///
     /// # Example
     ///
     /// Making 1024 total HTTP requests, with a max concurrency of 128
@@ -330,12 +330,12 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
             ready: AtomicSparseSet::new(cap),
             waker: AtomicWaker::new(),
         });
-        let mut slots = SparseSet::new(cap);
+        let mut slots = AtomicSparseSet::new(cap);
 
         // register the shared state on our tasks
         for (i, task) in v.iter_mut().enumerate() {
             slots.push(i);
-            shared.ready.push(i);
+            shared.ready.push_sync(i);
 
             // we know that we haven't cloned this arc before since it was created
             // just a few lines above

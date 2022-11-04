@@ -17,7 +17,7 @@ impl AtomicSparseSet {
         }
     }
 
-    pub fn push(&self, x: usize) {
+    pub fn push_sync(&self, x: usize) {
         let batch = self.set.len() / 2;
         let mask = (batch + 1).next_power_of_two();
         if x >= batch {
@@ -58,7 +58,8 @@ impl AtomicSparseSet {
             spin_loop();
         }
     }
-    pub fn pop(&self) -> Option<usize> {
+
+    pub fn pop_sync(&self) -> Option<usize> {
         let batch = self.set.len() / 2;
         let mask = (batch + 1).next_power_of_two();
 
@@ -86,6 +87,39 @@ impl AtomicSparseSet {
                 Ok(l) | Err(l) => len = l,
             }
             spin_loop();
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn push(&mut self, x: usize) {
+        let len = self.len.get_mut();
+        let batch = self.set.len() / 2;
+        if x >= batch || *len == batch {
+            return;
+        }
+
+        let sparse = *self.set[x + batch].get_mut();
+        let dense = *self.set[sparse].get_mut();
+
+        if sparse < *len && dense == x {
+            return;
+        }
+
+        *self.set[batch + x].get_mut() = *len;
+        *self.set[*len].get_mut() = x;
+        *len += 1;
+    }
+
+    pub fn pop(&mut self) -> Option<usize> {
+        let len = self.len.get_mut();
+        if *len == 0 {
+            None
+        } else {
+            *len -= 1;
+            Some(*self.set[*len].get_mut())
         }
     }
 }
