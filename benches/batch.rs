@@ -56,11 +56,11 @@ fn batch(c: &mut Criterion) {
     c.bench_function("FuturesUnorderedBounded", |b| {
         b.iter(|| {
             for _ in 0..BATCH {
-                queue.push(make_req(&mut rs)).map_err(drop).unwrap();
+                queue.push(make_req(&mut rs));
             }
             for _ in BATCH..TOTAL {
                 runtime.block_on(queue.next());
-                queue.push(make_req(&mut rs)).map_err(drop).unwrap();
+                queue.push(make_req(&mut rs));
             }
             for _ in 0..BATCH {
                 runtime.block_on(queue.next());
@@ -70,20 +70,14 @@ fn batch(c: &mut Criterion) {
 
     c.bench_function("futures::join_all", |b| {
         b.iter(|| {
-            let mut futs = Vec::new();
-            for _ in 0..BATCH * 8 {
-                futs.push(make_req(&mut rs))
-            }
+            let futs = (0..BATCH * 8).map(|_| make_req(&mut rs));
             runtime.block_on(futures::future::join_all(futs));
         })
     });
 
     c.bench_function("crate::join_all", |b| {
         b.iter(|| {
-            let mut futs = Vec::new();
-            for _ in 0..BATCH * 8 {
-                futs.push(make_req(&mut rs))
-            }
+            let futs = (0..BATCH * 8).map(|_| make_req(&mut rs));
             runtime.block_on(futures_buffered::join_all(futs));
         })
     });
