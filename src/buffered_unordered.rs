@@ -89,10 +89,7 @@ where
         while let Some(i) = this.in_progress_queue.slots.pop() {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(fut)) => {
-                    project_slice(this.in_progress_queue.inner.as_mut(), i)
-                        .project()
-                        .slot
-                        .set(Some(fut));
+                    project_slice(this.in_progress_queue.inner.as_mut(), i).set(Some(fut));
                     this.in_progress_queue.shared.ready.push_sync(i);
                 }
                 Poll::Ready(None) | Poll::Pending => {

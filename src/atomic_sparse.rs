@@ -1,6 +1,5 @@
 use std::{hint::spin_loop, sync::atomic::AtomicUsize};
 
-#[derive(Debug)]
 pub struct AtomicSparseSet {
     /// max len is set.len() / 2
     set: Box<[AtomicUsize]>,
