@@ -93,6 +93,10 @@ impl AtomicSparseSet {
         self.len.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub fn capacity(&self) -> usize {
+        self.set.len() / 2
+    }
+
     pub fn push(&mut self, x: usize) {
         let len = self.len.get_mut();
         let batch = self.set.len() / 2;

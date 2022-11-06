@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{atomic_sparse::AtomicSparseSet, project_slice};
+use crate::{arc_slice::ArcSlice, atomic_sparse::AtomicSparseSet, project_slice};
 use futures_util::Stream;
 
 /// A set of futures which may complete in any order.
@@ -102,7 +102,7 @@ use futures_util::Stream;
 pub struct FuturesUnorderedBounded<F> {
     pub(crate) slots: AtomicSparseSet,
     pub(crate) inner: Pin<Box<[Option<F>]>>,
-    pub(crate) shared: arc_slice::ArcSlice,
+    pub(crate) shared: ArcSlice,
 }
 impl<F> Unpin for FuturesUnorderedBounded<F> {}
 
@@ -115,7 +115,7 @@ impl<F> FuturesUnorderedBounded<F> {
     pub fn new(cap: usize) -> Self {
         // create the shared data that is part of the queue and
         // the wakers
-        let shared = arc_slice::ArcSlice::new(cap);
+        let shared = ArcSlice::new(cap);
 
         // create the task buffer + slot stack
         let mut v: Vec<Option<F>> = Vec::with_capacity(cap);
@@ -299,7 +299,7 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
         // determine the actual capacity and create the shared state
         let cap = v.len();
         let slots = AtomicSparseSet::new(cap);
-        let mut shared = arc_slice::ArcSlice::new(cap);
+        let mut shared = ArcSlice::new(cap);
         // we know that we haven't cloned this arc before, since it was created just above
         let meta = unsafe { shared.get_mut_unchecked() };
 
@@ -313,318 +313,6 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
             inner: v.into_boxed_slice().into(),
             shared,
             slots,
-        }
-    }
-}
-
-mod arc_slice {
-    use std::{
-        alloc::{dealloc, handle_alloc_error, Layout},
-        marker::PhantomData,
-        mem::{align_of, ManuallyDrop},
-        ops::Deref,
-        process::abort,
-        ptr::{self, drop_in_place, NonNull},
-        sync::atomic::{self, AtomicUsize},
-        task::{RawWaker, RawWakerVTable, Waker},
-    };
-
-    use futures_util::task::AtomicWaker;
-
-    use crate::atomic_sparse::AtomicSparseSet;
-
-    pub(crate) struct ArcSlice {
-        ptr: NonNull<ArcSliceInner>,
-        phantom: PhantomData<ArcSliceInner>,
-    }
-    pub(crate) struct ArcSlot {
-        ptr: NonNull<usize>,
-        phantom: PhantomData<ArcSliceInner>,
-    }
-
-    impl Deref for ArcSlice {
-        type Target = ArcSliceInnerMeta;
-
-        fn deref(&self) -> &Self::Target {
-            &unsafe { self.ptr.as_ref() }.meta
-        }
-    }
-    impl ArcSlice {
-        pub(crate) fn get(&self, index: usize) -> ArcSlot {
-            self.inc_strong();
-            let ptr: *mut ArcSliceInner = NonNull::as_ptr(self.ptr);
-
-            // SAFETY: This cannot go through Deref::deref or RcBoxPtr::inner because
-            // this is required to retain raw/mut provenance such that e.g. `get_mut` can
-            // write through the pointer after the Rc is recovered through `from_raw`.
-            let slice = unsafe { ptr::addr_of_mut!((*ptr).slice) } as *mut usize;
-            let slot = unsafe { slice.add(index) };
-            ArcSlot {
-                ptr: unsafe { NonNull::new_unchecked(slot) },
-                phantom: PhantomData,
-            }
-        }
-    }
-
-    impl ArcSlot {
-        unsafe fn meta_raw_ptr(ptr: *mut usize) -> *mut ArcSliceInnerMeta {
-            fn padding_needed_for(layout: &Layout, align: usize) -> usize {
-                let len = layout.size();
-
-                // Rounded up value is:
-                //   len_rounded_up = (len + align - 1) & !(align - 1);
-                // and then we return the padding difference: `len_rounded_up - len`.
-                //
-                // We use modular arithmetic throughout:
-                //
-                // 1. align is guaranteed to be > 0, so align - 1 is always
-                //    valid.
-                //
-                // 2. `len + align - 1` can overflow by at most `align - 1`,
-                //    so the &-mask with `!(align - 1)` will ensure that in the
-                //    case of overflow, `len_rounded_up` will itself be 0.
-                //    Thus the returned padding, when added to `len`, yields 0,
-                //    which trivially satisfies the alignment `align`.
-                //
-                // (Of course, attempts to allocate blocks of memory whose
-                // size and padding overflow in the above manner should cause
-                // the allocator to yield an error anyway.)
-
-                let len_rounded_up =
-                    len.wrapping_add(align).wrapping_sub(1) & !align.wrapping_sub(1);
-                len_rounded_up.wrapping_sub(len)
-            }
-
-            let index = *ptr;
-            let slice_start = ptr.sub(index);
-
-            let layout = Layout::new::<ArcSliceInnerMeta>();
-            let offset = layout.size() + padding_needed_for(&layout, align_of::<usize>());
-
-            unsafe { slice_start.cast::<u8>().sub(offset) }.cast::<ArcSliceInnerMeta>()
-        }
-        unsafe fn meta_raw<'a>(ptr: *const usize) -> &'a ArcSliceInnerMeta {
-            unsafe { &*Self::meta_raw_ptr(ptr as *mut usize) }
-        }
-
-        fn meta(&self) -> &ArcSliceInnerMeta {
-            unsafe { Self::meta_raw(self.ptr.as_ptr()) }
-        }
-
-        pub(crate) fn waker(self) -> Waker {
-            unsafe { Waker::from_raw(self.raw_waker()) }
-        }
-        fn raw_waker(self) -> RawWaker {
-            // Increment the reference count of the arc to clone it.
-            unsafe fn clone_waker(waker: *const ()) -> RawWaker {
-                ArcSlot::meta_raw(waker.cast()).inc_strong();
-                RawWaker::new(
-                    waker,
-                    &RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker),
-                )
-            }
-
-            unsafe fn wake(waker: *const ()) {
-                wake_by_ref(waker);
-                drop_waker(waker);
-            }
-
-            unsafe fn wake_by_ref(waker: *const ()) {
-                let slot = waker.cast();
-                let meta = ArcSlot::meta_raw(slot);
-                meta.ready.push_sync(*slot);
-                meta.waker.wake();
-            }
-
-            // Decrement the reference count of the Arc on drop
-            unsafe fn drop_waker(waker: *const ()) {
-                drop(ArcSlot {
-                    ptr: NonNull::new_unchecked(waker as *mut _),
-                    phantom: PhantomData,
-                });
-            }
-
-            let waker = ManuallyDrop::new(self);
-
-            RawWaker::new(
-                waker.ptr.as_ptr() as *const (),
-                &RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker),
-            )
-        }
-    }
-
-    impl ArcSliceInnerMeta {
-        fn inc_strong(&self) {
-            // Using a relaxed ordering is alright here, as knowledge of the
-            // original reference prevents other threads from erroneously deleting
-            // the object.
-            //
-            // As explained in the [Boost documentation][1], Increasing the
-            // reference counter can always be done with memory_order_relaxed: New
-            // references to an object can only be formed from an existing
-            // reference, and passing an existing reference from one thread to
-            // another must already provide any required synchronization.
-            //
-            // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
-            let old_size = self
-                .strong
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            // However we need to guard against massive refcounts in case someone is `mem::forget`ing
-            // Arcs. If we don't do this the count can overflow and users will use-after free. This
-            // branch will never be taken in any realistic program. We abort because such a program is
-            // incredibly degenerate, and we don't care to support it.
-            //
-            // This check is not 100% water-proof: we error when the refcount grows beyond `isize::MAX`.
-            // But we do that check *after* having done the increment, so there is a chance here that
-            // the worst already happened and we actually do overflow the `usize` counter. However, that
-            // requires the counter to grow from `isize::MAX` to `usize::MAX` between the increment
-            // above and the `abort` below, which seems exceedingly unlikely.
-            if old_size > (isize::MAX) as usize {
-                abort();
-            }
-        }
-        fn dec_strong(&self) -> bool {
-            // Because `fetch_sub` is already atomic, we do not need to synchronize
-            // with other threads unless we are going to delete the object. This
-            // same logic applies to the below `fetch_sub` to the `weak` count.
-            let old_size = self
-                .strong
-                .fetch_sub(1, std::sync::atomic::Ordering::Release);
-            if old_size != 1 {
-                return false;
-            }
-
-            // This fence is needed to prevent reordering of use of the data and
-            // deletion of the data.  Because it is marked `Release`, the decreasing
-            // of the reference count synchronizes with this `Acquire` fence. This
-            // means that use of the data happens before decreasing the reference
-            // count, which happens before this fence, which happens before the
-            // deletion of the data.
-            //
-            // As explained in the [Boost documentation][1],
-            //
-            // > It is important to enforce any possible access to the object in one
-            // > thread (through an existing reference) to *happen before* deleting
-            // > the object in a different thread. This is achieved by a "release"
-            // > operation after dropping a reference (any access to the object
-            // > through this reference must obviously happened before), and an
-            // > "acquire" operation before deleting the object.
-            //
-            // In particular, while the contents of an Arc are usually immutable, it's
-            // possible to have interior writes to something like a Mutex<T>. Since a
-            // Mutex is not acquired when it is deleted, we can't rely on its
-            // synchronization logic to make writes in thread A visible to a destructor
-            // running in thread B.
-            //
-            // Also note that the Acquire fence here could probably be replaced with an
-            // Acquire load, which could improve performance in highly-contended
-            // situations. See [2].
-            //
-            // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
-            // [2]: (https://github.com/rust-lang/rust/pull/41714)
-            atomic::fence(atomic::Ordering::Acquire);
-            true
-        }
-    }
-
-    impl Drop for ArcSlot {
-        fn drop(&mut self) {
-            let meta = self.meta();
-            if meta.dec_strong() {
-                let layout = ArcSlice::layout(meta.capacity);
-                unsafe {
-                    let p = ArcSlot::meta_raw_ptr(self.ptr.as_ptr());
-                    drop_in_place(p);
-                    dealloc(p.cast(), layout);
-                }
-            }
-        }
-    }
-
-    impl Drop for ArcSlice {
-        fn drop(&mut self) {
-            if self.dec_strong() {
-                let layout = ArcSlice::layout(self.capacity);
-                debug_assert_eq!(unsafe { Layout::for_value(self.ptr.as_ref()) }, layout);
-                unsafe {
-                    let p = self.ptr.as_ptr();
-                    drop_in_place(p);
-                    dealloc(p.cast(), layout);
-                }
-            }
-        }
-    }
-
-    // This is repr(C) to future-proof against possible field-reordering, which
-    // would interfere with otherwise safe [into|from]_raw() of transmutable
-    // inner types.
-    #[repr(C)]
-    pub(crate) struct ArcSliceInner {
-        pub(crate) meta: ArcSliceInnerMeta,
-        slice: [usize],
-    }
-
-    #[repr(C)]
-    pub(crate) struct ArcSliceInnerMeta {
-        strong: AtomicUsize,
-        pub(crate) ready: AtomicSparseSet,
-        pub(crate) waker: AtomicWaker,
-        capacity: usize,
-    }
-
-    impl ArcSlice {
-        pub(crate) unsafe fn get_mut_unchecked(&mut self) -> &mut ArcSliceInnerMeta {
-            &mut self.ptr.as_mut().meta
-        }
-
-        /// Allocates an `ArcInner<T>` with sufficient space for
-        /// a possibly-unsized inner value where the value has the layout provided.
-        pub(crate) fn new(cap: usize) -> Self {
-            // code taken and modified from `Arc::allocate_for_layout`
-
-            let arc_slice_layout = Self::layout(cap);
-
-            // safety: layout size is > 0 because it has at least 7 usizes
-            // in the metadata alone
-            let ptr = unsafe { std::alloc::alloc(arc_slice_layout) };
-            if ptr.is_null() {
-                handle_alloc_error(arc_slice_layout)
-            }
-
-            // Initialize the ArcInner
-            let inner =
-                ptr::slice_from_raw_parts_mut(ptr.cast::<usize>(), cap) as *mut ArcSliceInner;
-            debug_assert_eq!(unsafe { Layout::for_value(&*inner) }, arc_slice_layout);
-
-            unsafe {
-                ptr::write(&mut (*inner).meta.strong, AtomicUsize::new(1));
-                ptr::write(&mut (*inner).meta.ready, AtomicSparseSet::new(cap));
-                ptr::write(&mut (*inner).meta.waker, AtomicWaker::new());
-                ptr::write(&mut (*inner).meta.capacity, cap);
-
-                for i in 0..cap {
-                    ptr::write(&mut (*inner).slice[i], i);
-                }
-            }
-
-            Self {
-                ptr: unsafe { NonNull::new_unchecked(inner) },
-                phantom: PhantomData,
-            }
-        }
-
-        fn layout(cap: usize) -> Layout {
-            let padded = Layout::new::<usize>().pad_to_align();
-            let alloc_size = padded.size().checked_mul(cap).unwrap();
-            let slice_layout =
-                Layout::from_size_align(alloc_size, Layout::new::<usize>().align()).unwrap();
-
-            Layout::new::<ArcSliceInnerMeta>()
-                .extend(slice_layout)
-                .unwrap()
-                .0
-                .pad_to_align()
         }
     }
 }
