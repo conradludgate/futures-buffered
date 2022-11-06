@@ -282,22 +282,11 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
     /// # Ok(()) }
     /// ```
     fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
-        let iter = iter.into_iter();
-
-        // determine a suitable initial capacity
-        let cap = match iter.size_hint() {
-            (_, Some(max)) => max,
-            (min, None) => min,
-        };
-
         // store the futures in our task list
-        let mut v: Vec<Option<F>> = Vec::with_capacity(cap);
-        for fut in iter {
-            v.push(Some(fut));
-        }
+        let inner: Box<[Option<F>]> = iter.into_iter().map(Some).collect();
 
         // determine the actual capacity and create the shared state
-        let cap = v.len();
+        let cap = inner.len();
         let slots = AtomicSparseSet::new(cap);
         let mut shared = ArcSlice::new(cap);
         // we know that we haven't cloned this arc before, since it was created just above
@@ -310,7 +299,7 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
 
         // create the queue
         Self {
-            inner: v.into_boxed_slice().into(),
+            inner: inner.into(),
             shared,
             slots,
         }
