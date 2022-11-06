@@ -16,13 +16,13 @@
 //! in a single threaded tokio runtime:
 //!
 //! ```text
-//! FuturesUnordered         time:   [220.20 ms 220.97 ms 221.80 ms]
-//! FuturesUnorderedBounded  time:   [208.73 ms 209.26 ms 209.86 ms]
+//! FuturesUnordered         time:   [204.44 ms 205.47 ms 206.61 ms]
+//! FuturesUnorderedBounded  time:   [191.92 ms 192.52 ms 193.15 ms]
 //! ```
 //!
 //! ### Memory usage
 //!
-//! Running 512000 `Ready<i32>` futures with 256 concurrent jobs in a single threaded tokio runtime.
+//! Running 512000 `Ready<i32>` futures with 256 concurrent jobs.
 //!
 //! - count: the number of times alloc/dealloc was called
 //! - alloc: the number of cumulative bytes allocated
@@ -31,12 +31,12 @@
 //! ```text
 //! FuturesUnordered
 //!     count:    1024002
-//!     alloc:    36864136 B
-//!     dealloc:  36864000 B
+//!     alloc:    40960144 B
+//!     dealloc:  40960000 B
 //!
 //! FuturesUnorderedBounded
-//!     count:    260
-//!     alloc:    20544 B
+//!     count:    4
+//!     alloc:    14400 B
 //!     dealloc:  0 B
 //! ```
 //!
@@ -96,7 +96,6 @@ mod atomic_sparse;
 mod buffered_unordered;
 mod futures_unordered_bounded;
 mod join_all;
-// mod sparse;
 mod try_join_all;
 
 pub use buffered_unordered::{BufferUnordered, BufferedStreamExt};

@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use futures_buffered::FuturesUnorderedBounded;
+use futures::stream;
+use futures_buffered::{BufferedStreamExt, FuturesUnorderedBounded};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use hyper::{
     client::conn::{self, ResponseFuture, SendRequest},
@@ -65,6 +66,21 @@ fn batch(c: &mut Criterion) {
             for _ in 0..BATCH {
                 runtime.block_on(queue.next());
             }
+        })
+    });
+
+    c.bench_function("BufferUnordered", |b| {
+        b.iter(|| {
+            let mut s = stream::iter((0..TOTAL).map(|_| make_req(&mut rs))).buffer_unordered(BATCH);
+            while runtime.block_on(s.next()).is_some() {}
+        })
+    });
+
+    c.bench_function("BufferedUnordered", |b| {
+        b.iter(|| {
+            let mut s =
+                stream::iter((0..TOTAL).map(|_| make_req(&mut rs))).buffered_unordered(BATCH);
+            while runtime.block_on(s.next()).is_some() {}
         })
     });
 

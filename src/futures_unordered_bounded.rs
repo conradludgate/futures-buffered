@@ -23,13 +23,13 @@ use futures_util::Stream;
 /// in a single threaded tokio runtime:
 ///
 /// ```text
-/// FuturesUnordered         time:   [220.20 ms 220.97 ms 221.80 ms]
-/// FuturesUnorderedBounded  time:   [208.73 ms 209.26 ms 209.86 ms]
+/// FuturesUnordered         time:   [204.44 ms 205.47 ms 206.61 ms]
+/// FuturesUnorderedBounded  time:   [191.92 ms 192.52 ms 193.15 ms]
 /// ```
 ///
 /// ### Memory usage
 ///
-/// Running 512000 `Ready<i32>` futures with 256 concurrent jobs in a single threaded tokio runtime.
+/// Running 512000 `Ready<i32>` futures with 256 concurrent jobs.
 ///
 /// - count: the number of times alloc/dealloc was called
 /// - alloc: the number of cumulative bytes allocated
@@ -38,12 +38,12 @@ use futures_util::Stream;
 /// ```text
 /// FuturesUnordered
 ///     count:    1024002
-///     alloc:    36864136 B
-///     dealloc:  36864000 B
+///     alloc:    40960144 B
+///     dealloc:  40960000 B
 ///
 /// FuturesUnorderedBounded
-///     count:    260
-///     alloc:    20544 B
+///     count:    4
+///     alloc:    14400 B
 ///     dealloc:  0 B
 /// ```
 ///
@@ -324,7 +324,7 @@ mod arc_slice {
         mem::{align_of, ManuallyDrop},
         ops::Deref,
         process::abort,
-        ptr::{self, NonNull},
+        ptr::{self, drop_in_place, NonNull},
         sync::atomic::{self, AtomicUsize},
         task::{RawWaker, RawWakerVTable, Waker},
     };
@@ -367,7 +367,7 @@ mod arc_slice {
     }
 
     impl ArcSlot {
-        unsafe fn meta_raw<'a>(ptr: *const usize) -> &'a ArcSliceInnerMeta {
+        unsafe fn meta_raw_ptr(ptr: *mut usize) -> *mut ArcSliceInnerMeta {
             fn padding_needed_for(layout: &Layout, align: usize) -> usize {
                 let len = layout.size();
 
@@ -401,9 +401,10 @@ mod arc_slice {
             let layout = Layout::new::<ArcSliceInnerMeta>();
             let offset = layout.size() + padding_needed_for(&layout, align_of::<usize>());
 
-            let meta_start =
-                unsafe { slice_start.cast::<u8>().sub(offset) }.cast::<ArcSliceInnerMeta>();
-            unsafe { &*meta_start }
+            unsafe { slice_start.cast::<u8>().sub(offset) }.cast::<ArcSliceInnerMeta>()
+        }
+        unsafe fn meta_raw<'a>(ptr: *const usize) -> &'a ArcSliceInnerMeta {
+            unsafe { &*Self::meta_raw_ptr(ptr as *mut usize) }
         }
 
         fn meta(&self) -> &ArcSliceInnerMeta {
@@ -468,7 +469,6 @@ mod arc_slice {
             let old_size = self
                 .strong
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            dbg!(old_size);
 
             // However we need to guard against massive refcounts in case someone is `mem::forget`ing
             // Arcs. If we don't do this the count can overflow and users will use-after free. This
@@ -491,7 +491,6 @@ mod arc_slice {
             let old_size = self
                 .strong
                 .fetch_sub(1, std::sync::atomic::Ordering::Release);
-            dbg!(old_size);
             if old_size != 1 {
                 return false;
             }
@@ -533,8 +532,12 @@ mod arc_slice {
         fn drop(&mut self) {
             let meta = self.meta();
             if meta.dec_strong() {
-                dbg!(meta as *const _);
-                unsafe { dealloc(meta as *const _ as *mut u8, ArcSlice::layout(meta.capacity)) }
+                let layout = ArcSlice::layout(meta.capacity);
+                unsafe {
+                    let p = ArcSlot::meta_raw_ptr(self.ptr.as_ptr());
+                    drop_in_place(p);
+                    dealloc(p.cast(), layout);
+                }
             }
         }
     }
@@ -544,8 +547,11 @@ mod arc_slice {
             if self.dec_strong() {
                 let layout = ArcSlice::layout(self.capacity);
                 debug_assert_eq!(unsafe { Layout::for_value(self.ptr.as_ref()) }, layout);
-                dbg!(self.ptr.as_ptr());
-                unsafe { dealloc(self.ptr.as_ptr().cast(), layout) }
+                unsafe {
+                    let p = self.ptr.as_ptr();
+                    drop_in_place(p);
+                    dealloc(p.cast(), layout);
+                }
             }
         }
     }
@@ -581,7 +587,7 @@ mod arc_slice {
 
             // safety: layout size is > 0 because it has at least 7 usizes
             // in the metadata alone
-            let ptr = unsafe { dbg!(std::alloc::alloc(arc_slice_layout)) };
+            let ptr = unsafe { std::alloc::alloc(arc_slice_layout) };
             if ptr.is_null() {
                 handle_alloc_error(arc_slice_layout)
             }

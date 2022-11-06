@@ -45,6 +45,8 @@ impl<F: TryFuture> Unpin for TryJoinAll<F> {}
 /// assert_eq!(try_join_all(futures).await, Err(4));
 /// # });
 /// ```
+///
+/// See [`join_all`](crate::join_all) for benchmark results
 pub fn try_join_all<I>(iter: I) -> TryJoinAll<<I as IntoIterator>::Item>
 where
     I: IntoIterator,

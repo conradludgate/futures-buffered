@@ -50,6 +50,8 @@ pub trait BufferedStreamExt: Stream {
     /// assert_eq!(buffered.next().await, None);
     /// # Ok::<(), i32>(()) }).unwrap();
     /// ```
+    ///
+    /// See [`BufferUnordered`] for performance details
     fn buffered_unordered(self, n: usize) -> BufferUnordered<Self>
     where
         Self::Item: Future,
@@ -65,6 +67,62 @@ pub trait BufferedStreamExt: Stream {
 pin_project!(
     /// Stream for the [`buffered_unordered`](BufferedStreamExt::buffered_unordered)
     /// method.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use futures::channel::oneshot;
+    /// use futures::stream::{self, StreamExt};
+    /// use futures_buffered::BufferedStreamExt;
+    ///
+    /// let (send_one, recv_one) = oneshot::channel();
+    /// let (send_two, recv_two) = oneshot::channel();
+    ///
+    /// let stream_of_futures = stream::iter(vec![recv_one, recv_two]);
+    /// let mut buffered = stream_of_futures.buffered_unordered(10);
+    ///
+    /// send_two.send(2i32)?;
+    /// assert_eq!(buffered.next().await, Some(Ok(2i32)));
+    ///
+    /// send_one.send(1i32)?;
+    /// assert_eq!(buffered.next().await, Some(Ok(1i32)));
+    ///
+    /// assert_eq!(buffered.next().await, None);
+    /// # Ok::<(), i32>(()) }).unwrap();
+    /// ```
+    ///
+    /// ## Benchmarks
+    ///
+    /// ### Speed
+    ///
+    /// Running 512000 http requests (over an already establish HTTP2 connection) with 256 concurrent jobs
+    /// in a single threaded tokio runtime:
+    ///
+    /// ```text
+    /// futures::stream::BufferUnordered    time:   [214.98 ms 215.90 ms 217.03 ms]
+    /// futures_buffered::BufferUnordered   time:   [203.90 ms 204.48 ms 205.11 ms]
+    /// ```
+    ///
+    /// ### Memory usage
+    ///
+    /// Running 512000 `Ready<i32>` futures with 256 concurrent jobs.
+    ///
+    /// - count: the number of times alloc/dealloc was called
+    /// - alloc: the number of cumulative bytes allocated
+    /// - dealloc: the number of cumulative bytes deallocated
+    ///
+    /// ```text
+    /// futures::stream::BufferUnordered
+    ///     count:    1024002
+    ///     alloc:    40960144 B
+    ///     dealloc:  40960000 B
+    ///
+    /// futures_buffered::BufferUnordered
+    ///     count:    4
+    ///     alloc:    14400 B
+    ///     dealloc:  0 B
+    /// ```
     #[must_use = "streams do nothing unless polled"]
     pub struct BufferUnordered<S: Stream> {
         #[pin]
