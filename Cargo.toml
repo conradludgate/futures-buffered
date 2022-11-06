@@ -7,20 +7,26 @@ license = "MIT"
 repository = "https://github.com/conradludgate/futures-buffered"
 authors = ["Conrad Ludgate <conradludgate@gmail.com"]
 categories = ["asynchronous"]
+bench = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 futures-core = "0.3.21"
-futures-util = "0.3.21"
 pin-project-lite = "0.2"
 
 [dev-dependencies]
-criterion = { version = "0.4" }
 futures = "0.3.21"
-hyper = { version = "0.14", features = ["client", "http2", "tcp"] }
-tokio = { version = "1", features = ["full", "macros"] }
 
 [[bench]]
 name = "batch"
 harness = false
+
+[target.'cfg(loom)'.dependencies]
+loom = { version = "0.5", features = ["checkpoint"] }
+
+# for some reason, these were causing trouble with loom
+[target.'cfg(not(loom))'.dev-dependencies]
+criterion = { version = "0.4" }
+hyper = { version = "0.14", features = ["client", "http2", "tcp"] }
+tokio = { version = "1", features = ["full", "macros"] }

@@ -98,6 +98,7 @@ mod futures_unordered_bounded;
 mod join_all;
 mod try_join_all;
 mod arc_slice;
+mod atomic_waker;
 
 pub use buffered_unordered::{BufferUnordered, BufferedStreamExt};
 pub use futures_unordered_bounded::FuturesUnorderedBounded;

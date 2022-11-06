@@ -6,7 +6,7 @@ use std::{
 
 use crate::project_slice;
 use crate::FuturesUnorderedBounded;
-use futures_util::{stream::Fuse, Stream, StreamExt};
+use futures_core::Stream;
 use pin_project_lite::pin_project;
 
 impl<T: ?Sized + Stream> BufferedStreamExt for T {}
@@ -58,7 +58,7 @@ pub trait BufferedStreamExt: Stream {
         Self: Sized,
     {
         BufferUnordered {
-            stream: StreamExt::fuse(self),
+            stream: Some(self),
             in_progress_queue: FuturesUnorderedBounded::new(n),
         }
     }
@@ -126,7 +126,7 @@ pin_project!(
     #[must_use = "streams do nothing unless polled"]
     pub struct BufferUnordered<S: Stream> {
         #[pin]
-        stream: Fuse<S>,
+        stream: Option<S>,
         in_progress_queue: FuturesUnorderedBounded<S::Item>,
     }
 );
@@ -145,7 +145,14 @@ where
         // our queue of futures.
 
         while let Some(i) = this.in_progress_queue.slots.pop() {
-            match this.stream.as_mut().poll_next(cx) {
+            let s = match this.stream.as_mut().as_pin_mut() {
+                Some(s) => s,
+                None => {
+                    this.in_progress_queue.slots.push(i);
+                    break;
+                }
+            };
+            match s.poll_next(cx) {
                 Poll::Ready(Some(fut)) => {
                     project_slice(this.in_progress_queue.inner.as_mut(), i).set(Some(fut));
                     this.in_progress_queue.shared.ready.push_sync(i);
@@ -158,13 +165,13 @@ where
         }
 
         // Attempt to pull the next value from the in_progress_queue
-        match this.in_progress_queue.poll_next_unpin(cx) {
+        match Pin::new(this.in_progress_queue).poll_next(cx) {
             x @ (Poll::Pending | Poll::Ready(Some(_))) => return x,
             Poll::Ready(None) => {}
         }
 
         // If more values are still coming from the stream, we're not done yet
-        if this.stream.is_done() {
+        if this.stream.as_pin_mut().is_none() {
             Poll::Ready(None)
         } else {
             Poll::Pending
@@ -172,13 +179,18 @@ where
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let queue_len = self.in_progress_queue.len();
-        let (lower, upper) = self.stream.size_hint();
-        let lower = lower.saturating_add(queue_len);
-        let upper = match upper {
-            Some(x) => x.checked_add(queue_len),
-            None => None,
-        };
-        (lower, upper)
+        match &self.stream {
+            Some(s) => {
+                let queue_len = self.in_progress_queue.len();
+                let (lower, upper) = s.size_hint();
+                let lower = lower.saturating_add(queue_len);
+                let upper = match upper {
+                    Some(x) => x.checked_add(queue_len),
+                    None => None,
+                };
+                (lower, upper)
+            }
+            _ => (0, Some(0)),
+        }
     }
 }

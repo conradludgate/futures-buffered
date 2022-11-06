@@ -126,3 +126,29 @@ impl AtomicSparseSet {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg(loom)]
+mod loom_tests {
+    use super::AtomicSparseSet;
+    use loom::{sync::Arc, thread};
+
+    #[test]
+    fn test_concurrent_logic() {
+        loom::model(|| {
+            let set = Arc::new(AtomicSparseSet::new(1));
+            let set2 = Arc::clone(&set);
+
+            let handle = thread::spawn(move || {
+                set2.push_sync(0);
+            });
+
+            set.push_sync(0);
+
+            handle.join().unwrap();
+
+            assert_eq!(set.pop_sync(), Some(0));
+            assert_eq!(set.pop_sync(), None);
+        });
+    }
+}

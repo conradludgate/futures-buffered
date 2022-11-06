@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{arc_slice::ArcSlice, atomic_sparse::AtomicSparseSet, project_slice};
-use futures_util::Stream;
+use futures_core::Stream;
 
 /// A set of futures which may complete in any order.
 ///
@@ -303,5 +303,46 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
             shared,
             slots,
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(loom)]
+mod loom_tests {
+    use super::FuturesUnorderedBounded;
+    use futures::channel::oneshot;
+    use futures::FutureExt;
+    use futures::StreamExt;
+    use loom::thread;
+
+    #[test]
+    fn test_concurrent_logic() {
+        loom::model(|| {
+            let mut set = FuturesUnorderedBounded::new(2);
+            let (tx1, rx1) = oneshot::channel();
+            let (tx2, rx2) = oneshot::channel();
+            set.push(rx1);
+            set.push(rx2);
+
+            assert_eq!(set.next().now_or_never(), None);
+
+            thread::spawn(|| {
+                tx1.send(());
+            });
+
+            thread::spawn(|| {
+                tx2.send(());
+            });
+
+            let mut count = 0;
+            while count < 2 {
+                match set.next().now_or_never() {
+                    None => {}
+                    Some(Some(Ok(()))) => count += 1,
+                    Some(_) => panic!("completed early"),
+                }
+            }
+            assert_eq!(set.next().now_or_never(), Some(None));
+        });
     }
 }

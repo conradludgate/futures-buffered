@@ -5,13 +5,17 @@ use std::{
     ops::Deref,
     process::abort,
     ptr::{self, drop_in_place, NonNull},
-    sync::atomic::{self, AtomicUsize},
+    sync::atomic,
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
-use futures_util::task::AtomicWaker;
+#[cfg(loom)]
+pub(crate) use loom::sync::atomic::AtomicUsize;
 
-use crate::atomic_sparse::AtomicSparseSet;
+#[cfg(not(loom))]
+pub(crate) use std::sync::atomic::AtomicUsize;
+
+use crate::{atomic_sparse::AtomicSparseSet, atomic_waker::AtomicWaker};
 
 /// [`ArcSlice`] is a fun optimisation. For `FuturesUnorderedBounded`, we have `n` slots for futures,
 /// and we create a separate context when polling each individual future to avoid having n^2 polling.
@@ -326,6 +330,7 @@ impl ArcSlice {
     /// This `ArcSlice` must have a strong count of 1
     pub(crate) unsafe fn get_mut_unchecked(&mut self) -> &mut ArcSliceInnerMeta {
         let meta = &mut self.ptr.as_mut().meta;
+        #[cfg(not(loom))]
         debug_assert_eq!(
             *meta.strong.get_mut(),
             1,

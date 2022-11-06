@@ -1,7 +1,9 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use futures::stream;
+use futures::{
+    stream::{self, FuturesUnordered},
+    StreamExt,
+};
 use futures_buffered::{BufferedStreamExt, FuturesUnorderedBounded};
-use futures_util::{stream::FuturesUnordered, StreamExt};
 use hyper::{
     client::conn::{self, ResponseFuture, SendRequest},
     Body, Request,
