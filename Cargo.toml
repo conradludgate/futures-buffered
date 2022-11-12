@@ -1,12 +1,14 @@
 [package]
 name = "futures-buffered"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "future concurrency primitives with emphasis on performance and low memory usage"
 license = "MIT"
 repository = "https://github.com/conradludgate/futures-buffered"
 authors = ["Conrad Ludgate <conradludgate@gmail.com"]
 categories = ["asynchronous"]
+
+[lib]
 bench = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -14,9 +16,11 @@ bench = false
 [dependencies]
 futures-core = "0.3.21"
 pin-project-lite = "0.2"
+bitvec = "1"
 
 [dev-dependencies]
 futures = "0.3.21"
+futures-test = "0.3.21"
 
 [[bench]]
 name = "batch"

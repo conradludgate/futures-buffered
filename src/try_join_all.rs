@@ -1,4 +1,5 @@
-use std::{
+use alloc::{boxed::Box, vec::Vec};
+use core::{
     future::Future,
     mem::MaybeUninit,
     pin::Pin,
@@ -84,7 +85,7 @@ impl<F: TryFuture> Future for TryJoinAll<F> {
                     let boxed = unsafe {
                         // take the boxed slice
                         let boxed =
-                            std::mem::replace(&mut self.output, Vec::new().into_boxed_slice());
+                            core::mem::replace(&mut self.output, Vec::new().into_boxed_slice());
 
                         // Box::assume_init
                         let raw = Box::into_raw(boxed);
@@ -96,5 +97,26 @@ impl<F: TryFuture> Future for TryJoinAll<F> {
                 Poll::Pending => break Poll::Pending,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::future::ready;
+
+    #[test]
+    fn try_join_all() {
+        let x = futures::executor::block_on(crate::try_join_all(
+            (0..10).map(|_| ready(Result::<_, ()>::Ok(1))),
+        ))
+        .unwrap();
+
+        assert_eq!(x.len(), 10);
+        assert_eq!(x.capacity(), 10);
+
+        futures::executor::block_on(crate::try_join_all(
+            (0..10).map(|i| ready(if i == 9 { Err(()) } else { Ok(1) })),
+        ))
+        .unwrap_err();
     }
 }

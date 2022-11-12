@@ -99,6 +99,20 @@ fn batch(c: &mut Criterion) {
             runtime.block_on(futures_buffered::join_all(futs));
         })
     });
+
+    c.bench_function("Buffered", |b| {
+        b.iter(|| {
+            let mut s = stream::iter((0..TOTAL).map(|_| make_req(&mut rs))).buffered(BATCH);
+            while runtime.block_on(s.next()).is_some() {}
+        })
+    });
+
+    c.bench_function("BufferedOrdered", |b| {
+        b.iter(|| {
+            let mut s = stream::iter((0..TOTAL).map(|_| make_req(&mut rs))).buffered_ordered(BATCH);
+            while runtime.block_on(s.next()).is_some() {}
+        })
+    });
 }
 
 criterion_group!(benches, batch);

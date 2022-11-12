@@ -1,23 +1,23 @@
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
-use std::task::Waker;
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+use core::task::Waker;
 
 #[cfg(loom)]
 pub(crate) use loom::sync::atomic::AtomicUsize;
 
 #[cfg(not(loom))]
-pub(crate) use std::sync::atomic::AtomicUsize;
+pub(crate) use core::sync::atomic::AtomicUsize;
 
 mod unsafe_cell {
     #[cfg(loom)]
     pub use loom::cell::UnsafeCell;
 
     #[cfg(not(loom))]
-    pub(crate) struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
+    pub(crate) struct UnsafeCell<T>(core::cell::UnsafeCell<T>);
 
     #[cfg(not(loom))]
     impl<T> UnsafeCell<T> {
         pub(crate) fn new(data: T) -> UnsafeCell<T> {
-            UnsafeCell(std::cell::UnsafeCell::new(data))
+            UnsafeCell(core::cell::UnsafeCell::new(data))
         }
 
         pub(crate) fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
@@ -256,9 +256,9 @@ impl AtomicWaker {
     /// ```
     /// use futures::future::Future;
     /// use futures::task::{Context, Poll, AtomicWaker};
-    /// use std::sync::atomic::AtomicBool;
-    /// use std::sync::atomic::Ordering::Relaxed;
-    /// use std::pin::Pin;
+    /// use core::sync::atomic::AtomicBool;
+    /// use core::sync::atomic::Ordering::Relaxed;
+    /// use core::pin::Pin;
     ///
     /// struct Flag {
     ///     waker: AtomicWaker,

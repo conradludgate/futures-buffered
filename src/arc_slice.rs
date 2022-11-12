@@ -1,9 +1,8 @@
-use std::{
-    alloc::{dealloc, handle_alloc_error, Layout},
+use alloc::alloc::{dealloc, handle_alloc_error, Layout};
+use core::{
     marker::PhantomData,
     mem::{align_of, ManuallyDrop},
     ops::Deref,
-    process::abort,
     ptr::{self, drop_in_place, NonNull},
     sync::atomic,
     task::{RawWaker, RawWakerVTable, Waker},
@@ -13,7 +12,7 @@ use std::{
 pub(crate) use loom::sync::atomic::AtomicUsize;
 
 #[cfg(not(loom))]
-pub(crate) use std::sync::atomic::AtomicUsize;
+pub(crate) use core::sync::atomic::AtomicUsize;
 
 use crate::{atomic_sparse::AtomicSparseSet, atomic_waker::AtomicWaker};
 
@@ -227,7 +226,7 @@ impl ArcSliceInnerMeta {
         // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
         let old_size = self
             .strong
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         // However we need to guard against massive refcounts in case someone is `mem::forget`ing
         // Arcs. If we don't do this the count can overflow and users will use-after free. This
@@ -240,7 +239,7 @@ impl ArcSliceInnerMeta {
         // requires the counter to grow from `isize::MAX` to `usize::MAX` between the increment
         // above and the `abort` below, which seems exceedingly unlikely.
         if old_size > (isize::MAX) as usize {
-            abort();
+            abort("too many arc clones");
         }
     }
     fn dec_strong(&self) -> bool {
@@ -249,7 +248,7 @@ impl ArcSliceInnerMeta {
         // same logic applies to the below `fetch_sub` to the `weak` count.
         let old_size = self
             .strong
-            .fetch_sub(1, std::sync::atomic::Ordering::Release);
+            .fetch_sub(1, core::sync::atomic::Ordering::Release);
         if old_size != 1 {
             return false;
         }
@@ -348,8 +347,8 @@ impl ArcSlice {
 
         // safety: layout size is > 0 because it has at least 7 usizes
         // in the metadata alone
-        debug_assert!(std::mem::size_of::<ArcSliceInnerMeta>() > 0);
-        let ptr = unsafe { std::alloc::alloc(arc_slice_layout) };
+        debug_assert!(core::mem::size_of::<ArcSliceInnerMeta>() > 0);
+        let ptr = unsafe { alloc::alloc::alloc(arc_slice_layout) };
         if ptr.is_null() {
             handle_alloc_error(arc_slice_layout)
         }
@@ -390,4 +389,17 @@ impl ArcSlice {
             .0
             .pad_to_align()
     }
+}
+
+fn abort(s: &str) -> ! {
+    struct DoublePanic;
+
+    impl Drop for DoublePanic {
+        fn drop(&mut self) {
+            panic!("panicking twice to abort the program");
+        }
+    }
+
+    let _bomb = DoublePanic;
+    panic!("{}", s);
 }

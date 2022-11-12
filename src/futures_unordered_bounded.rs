@@ -1,11 +1,13 @@
-use std::{
+use alloc::{boxed::Box, vec::Vec};
+use core::{
+    fmt,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
 
 use crate::{arc_slice::ArcSlice, atomic_sparse::AtomicSparseSet, project_slice};
-use futures_core::Stream;
+use futures_core::{FusedStream, Stream};
 
 /// A set of futures which may complete in any order.
 ///
@@ -157,16 +159,21 @@ impl<F> FuturesUnorderedBounded<F> {
     /// # Errors
     /// This method will error if the buffer is currently full, returning the future back
     pub fn try_push(&mut self, fut: F) -> Result<(), F> {
+        self.try_push_with(fut, core::convert::identity)
+    }
+
+    #[inline]
+    pub(crate) fn try_push_with<T>(&mut self, t: T, mut f: impl FnMut(T) -> F) -> Result<(), T> {
         let mut inner: Pin<&mut [Option<F>]> = self.inner.as_mut();
         if let Some(i) = self.slots.pop() {
             // if there's a slot available, push the future in
             // and mark it as ready for polling
-            project_slice(inner.as_mut(), i).set(Some(fut));
+            project_slice(inner.as_mut(), i).set(Some(f(t)));
             self.shared.ready.push_sync(i);
             Ok(())
         } else {
             // if no slots, return back the future
-            Err(fut)
+            Err(t)
         }
     }
 
@@ -186,11 +193,17 @@ impl<F> FuturesUnorderedBounded<F> {
     pub fn capacity(&self) -> usize {
         self.inner.len()
     }
+
+    /// Returns `true` if the set contains no space for futures.
+    pub(crate) fn is_full(&self) -> bool {
+        self.slots.len() == 0
+    }
 }
 
 impl<F: Future> FuturesUnorderedBounded<F> {
     pub(crate) fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
         self.shared.waker.register(cx.waker());
+
         while let Some(i) = self.shared.ready.pop_sync() {
             let mut inner = self.inner.as_mut();
             let mut task = project_slice(inner.as_mut(), i);
@@ -210,6 +223,7 @@ impl<F: Future> FuturesUnorderedBounded<F> {
                 return Poll::Ready(Some((i, x)));
             }
         }
+
         if self.is_empty() {
             Poll::Ready(None)
         } else {
@@ -293,9 +307,7 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
         let meta = unsafe { shared.get_mut_unchecked() };
 
         // register the shared state on our tasks
-        for i in 0..cap {
-            meta.ready.push(i);
-        }
+        meta.ready.init();
 
         // create the queue
         Self {
@@ -303,6 +315,18 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
             shared,
             slots,
         }
+    }
+}
+
+impl<Fut: Future> FusedStream for FuturesUnorderedBounded<Fut> {
+    fn is_terminated(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<Fut: Future> fmt::Debug for FuturesUnorderedBounded<Fut> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FuturesUnorderedBounded {{ ... }}")
     }
 }
 
@@ -344,5 +368,196 @@ mod loom_tests {
             }
             assert_eq!(set.next().now_or_never(), Some(None));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::{
+        cell::Cell,
+        future::{poll_fn, ready},
+        time::Duration,
+    };
+    use futures::StreamExt;
+    use futures_test::task::noop_context;
+    use pin_project_lite::pin_project;
+    use std::{thread, time::Instant};
+
+    pin_project!(
+        struct PollCounter<'c, F> {
+            count: &'c Cell<usize>,
+            #[pin]
+            inner: F,
+        }
+    );
+
+    impl<F: Future> Future for PollCounter<'_, F> {
+        type Output = F::Output;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.count.set(self.count.get() + 1);
+            self.project().inner.poll(cx)
+        }
+    }
+
+    struct Sleep {
+        until: Instant,
+    }
+    impl Unpin for Sleep {}
+    impl Future for Sleep {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let until = self.until;
+            if until > Instant::now() {
+                let waker = cx.waker().clone();
+                thread::spawn(move || {
+                    thread::sleep(until.duration_since(Instant::now()));
+                    waker.wake()
+                });
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }
+    }
+
+    fn sleep(count: &Cell<usize>, dur: Duration) -> PollCounter<'_, Sleep> {
+        PollCounter {
+            count,
+            inner: Sleep {
+                until: Instant::now() + dur,
+            },
+        }
+    }
+
+    #[test]
+    fn single() {
+        let c = Cell::new(0);
+
+        let mut buffer = FuturesUnorderedBounded::new(10);
+        buffer.push(sleep(&c, Duration::from_secs(1)));
+        futures::executor::block_on(buffer.next());
+
+        drop(buffer);
+        assert_eq!(c.into_inner(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "attempted to push into a full `FuturesUnorderedBounded`")]
+    fn full() {
+        let mut buffer = FuturesUnorderedBounded::new(1);
+        buffer.push(ready(()));
+        buffer.push(ready(()));
+    }
+
+    #[test]
+    fn len() {
+        let mut buffer = FuturesUnorderedBounded::new(1);
+
+        assert_eq!(buffer.len(), 0);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.capacity(), 1);
+        assert_eq!(buffer.size_hint(), (0, Some(0)));
+        assert!(buffer.is_terminated());
+
+        buffer.push(ready(()));
+
+        assert_eq!(buffer.len(), 1);
+        assert!(!buffer.is_empty());
+        assert_eq!(buffer.capacity(), 1);
+        assert_eq!(buffer.size_hint(), (1, Some(1)));
+        assert!(!buffer.is_terminated());
+
+        futures::executor::block_on(buffer.next());
+
+        assert_eq!(buffer.len(), 0);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.capacity(), 1);
+        assert_eq!(buffer.size_hint(), (0, Some(0)));
+        assert!(buffer.is_terminated());
+    }
+
+    #[test]
+    fn from_iter() {
+        let buffer = FuturesUnorderedBounded::from_iter((0..10).map(|_| ready(())));
+
+        assert_eq!(buffer.len(), 10);
+        assert_eq!(buffer.capacity(), 10);
+        assert_eq!(buffer.size_hint(), (10, Some(10)));
+    }
+
+    #[test]
+    fn drop_while_waiting() {
+        let mut buffer = FuturesUnorderedBounded::new(10);
+        let waker = Cell::new(None);
+        buffer.push(poll_fn(|cx| {
+            waker.set(Some(cx.waker().clone()));
+            Poll::<()>::Pending
+        }));
+
+        assert_eq!(buffer.poll_next_unpin(&mut noop_context()), Poll::Pending);
+        drop(buffer);
+
+        let cx = waker.take().unwrap();
+        drop(cx);
+    }
+
+    #[test]
+    fn multi() {
+        fn wait(count: &Cell<usize>, i: usize) -> PollCounter<'_, Sleep> {
+            sleep(count, Duration::from_secs(1) / (i as u32 % 10 + 5))
+        }
+
+        let c = Cell::new(0);
+
+        let mut buffer = FuturesUnorderedBounded::new(10);
+        // build up
+        for i in 0..10 {
+            buffer.push(wait(&c, i));
+        }
+        // poll and insert
+        for i in 0..100 {
+            assert!(futures::executor::block_on(buffer.next()).is_some());
+            buffer.push(wait(&c, i));
+        }
+        // drain down
+        for _ in 0..10 {
+            assert!(futures::executor::block_on(buffer.next()).is_some());
+        }
+
+        let count = c.into_inner();
+        assert_eq!(count, 220);
+    }
+
+    #[test]
+    fn very_slow_task() {
+        let c = Cell::new(0);
+
+        let now = Instant::now();
+
+        let mut buffer = FuturesUnorderedBounded::new(10);
+        // build up
+        for _ in 0..9 {
+            buffer.push(sleep(&c, Duration::from_millis(10)));
+        }
+        // spawn a slow future among a bunch of fast ones.
+        // the test is to make sure this doesn't block the rest getting completed
+        buffer.push(sleep(&c, Duration::from_secs(2)));
+        // poll and insert
+        for _ in 0..100 {
+            assert!(futures::executor::block_on(buffer.next()).is_some());
+            buffer.push(sleep(&c, Duration::from_millis(10)));
+        }
+        // drain down
+        for _ in 0..10 {
+            assert!(futures::executor::block_on(buffer.next()).is_some());
+        }
+
+        let dur = now.elapsed();
+        assert!(dur < Duration::from_millis(2050));
+
+        let count = c.into_inner();
+        assert_eq!(count, 220);
     }
 }

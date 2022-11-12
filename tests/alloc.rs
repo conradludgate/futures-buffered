@@ -67,8 +67,15 @@ static ALLOCATOR: TrackingAllocator = TrackingAllocator {
     dealloc: AtomicUsize::new(0),
 };
 
+#[cfg(not(miri))]
 const BATCH: usize = 256;
+#[cfg(not(miri))]
 const TOTAL: usize = 512000;
+
+#[cfg(miri)]
+const BATCH: usize = 32;
+#[cfg(miri)]
+const TOTAL: usize = 128;
 
 #[test]
 fn futures_unordered() {

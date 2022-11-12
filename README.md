@@ -14,13 +14,13 @@ Running 512000 http requests (over an already establish HTTP2 connection) with 2
 in a single threaded tokio runtime:
 
 ```
-FuturesUnordered         time:   [220.20 ms 220.97 ms 221.80 ms]
-FuturesUnorderedBounded  time:   [208.73 ms 209.26 ms 209.86 ms]
+FuturesUnordered         time:   [204.44 ms 205.47 ms 206.61 ms]
+FuturesUnorderedBounded  time:   [191.92 ms 192.52 ms 193.15 ms]
 ```
 
 ### Memory usage
 
-Running 512000 `Ready<i32>` futures with 256 concurrent jobs in a single threaded tokio runtime.
+Running 512000 `Ready<i32>` futures with 256 concurrent jobs.
 
 - count: the number of times alloc/dealloc was called
 - alloc: the number of cumulative bytes allocated
@@ -29,13 +29,13 @@ Running 512000 `Ready<i32>` futures with 256 concurrent jobs in a single threade
 ```
 FuturesUnordered
     count:    1024002
-    alloc:    36864136
-    dealloc:  36864000
+    alloc:    40960144 B
+    dealloc:  40960000 B
 
 FuturesUnorderedBounded
-    count:    260
-    alloc:    20544
-    dealloc:  0
+    count:    4
+    alloc:    14400 B
+    dealloc:  0 B
 ```
 
 ### Conclusion
@@ -67,12 +67,12 @@ let mut queue = FuturesUnorderedBounded::new(128);
 
 // start up 128 requests
 for _ in 0..128 {
-    queue.push(make_req(&mut rs)).map_err(drop).unwrap();
+    queue.push(make_req(&mut rs));
 }
 // wait for a request to finish and start another to fill its place - up to 1024 total requests
 for _ in 128..1024 {
     queue.next().await;
-    queue.push(make_req(&mut rs)).map_err(drop).unwrap();
+    queue.push(make_req(&mut rs));
 }
 // wait for the tail end to finish
 for _ in 0..128 {

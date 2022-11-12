@@ -1,4 +1,5 @@
-use std::{hint::spin_loop, sync::atomic::AtomicUsize};
+use alloc::{boxed::Box, vec::Vec};
+use core::{hint::spin_loop, sync::atomic::AtomicUsize};
 
 pub struct AtomicSparseSet {
     /// max len is set.len() / 2
@@ -23,10 +24,10 @@ impl AtomicSparseSet {
             return;
         }
 
-        let mut len = self.len.load(std::sync::atomic::Ordering::Acquire);
+        let mut len = self.len.load(core::sync::atomic::Ordering::Acquire);
 
-        let sparse = self.set[x + batch].load(std::sync::atomic::Ordering::Relaxed);
-        let dense = self.set[sparse].load(std::sync::atomic::Ordering::Relaxed);
+        let sparse = self.set[x + batch].load(core::sync::atomic::Ordering::Relaxed);
+        let dense = self.set[sparse].load(core::sync::atomic::Ordering::Relaxed);
 
         if sparse < (len & !mask) && dense == x {
             return;
@@ -37,19 +38,20 @@ impl AtomicSparseSet {
             match self.len.compare_exchange_weak(
                 len,
                 len | mask,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Relaxed,
             ) {
                 Ok(len) if len == batch => {
-                    self.len.store(0, std::sync::atomic::Ordering::SeqCst);
+                    self.len.store(0, core::sync::atomic::Ordering::SeqCst);
                     return;
                 }
                 // we only claim the slot if len doesn't have the claim bit
                 Ok(len) if len & mask == 0 => {
                     // this is our slot, there should be no sync happeneing here
-                    self.set[batch + x].store(len, std::sync::atomic::Ordering::Release);
-                    self.set[len].store(x, std::sync::atomic::Ordering::Release);
-                    self.len.store(len + 1, std::sync::atomic::Ordering::SeqCst);
+                    self.set[batch + x].store(len, core::sync::atomic::Ordering::Release);
+                    self.set[len].store(x, core::sync::atomic::Ordering::Release);
+                    self.len
+                        .store(len + 1, core::sync::atomic::Ordering::SeqCst);
                     break;
                 }
                 Ok(l) | Err(l) => len = l,
@@ -62,25 +64,26 @@ impl AtomicSparseSet {
         let batch = self.set.len() / 2;
         let mask = (batch + 1).next_power_of_two();
 
-        let mut len = self.len.load(std::sync::atomic::Ordering::Acquire);
+        let mut len = self.len.load(core::sync::atomic::Ordering::Acquire);
 
         loop {
             // claim the slot
             match self.len.compare_exchange_weak(
                 len,
                 len | mask,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Relaxed,
             ) {
                 Ok(len) if len == 0 => {
-                    self.len.store(0, std::sync::atomic::Ordering::SeqCst);
+                    self.len.store(0, core::sync::atomic::Ordering::SeqCst);
                     break None;
                 }
                 // we only claim the slot if len doesn't have the claim bit
                 Ok(len) if len & mask == 0 => {
                     // this is our slot, there should be no sync happeneing here
-                    let x = self.set[len - 1].load(std::sync::atomic::Ordering::Acquire);
-                    self.len.store(len - 1, std::sync::atomic::Ordering::SeqCst);
+                    let x = self.set[len - 1].load(core::sync::atomic::Ordering::Acquire);
+                    self.len
+                        .store(len - 1, core::sync::atomic::Ordering::SeqCst);
                     break Some(x);
                 }
                 Ok(l) | Err(l) => len = l,
@@ -90,11 +93,19 @@ impl AtomicSparseSet {
     }
 
     pub fn len(&self) -> usize {
-        self.len.load(std::sync::atomic::Ordering::Relaxed)
+        self.len.load(core::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn capacity(&self) -> usize {
         self.set.len() / 2
+    }
+
+    pub(crate) fn init(&mut self) {
+        let len = self.set.len() / 2;
+        for (i, x) in self.set.iter_mut().enumerate() {
+            *x.get_mut() = i % len;
+        }
+        *self.len.get_mut() = len;
     }
 
     pub fn push(&mut self, x: usize) {
