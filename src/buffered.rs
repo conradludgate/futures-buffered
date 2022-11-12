@@ -1,11 +1,12 @@
 use core::{
     future::Future,
+    mem::MaybeUninit,
     pin::Pin,
     task::{Context, Poll},
 };
 
-use crate::FuturesOrderedBounded;
 use crate::FuturesUnorderedBounded;
+use crate::{futures_ordered_bounded::OrderWrapper, project_slice, FuturesOrderedBounded};
 use futures_core::ready;
 use futures_core::Stream;
 use pin_project_lite::pin_project;
@@ -108,23 +109,33 @@ where
 
         // First up, try to spawn off as many futures as possible by filling up
         // our queue of futures.
-        while !this.in_progress_queue.is_full() {
+        let ordered = this.in_progress_queue;
+        let unordered = &mut ordered.in_progress_queue;
+        while let Some(i) = unordered.empty_slots.pop() {
             if let Some(s) = this.stream.as_mut().as_pin_mut() {
                 match s.poll_next(cx) {
-                    Poll::Ready(Some(fut)) => this.in_progress_queue.push_back(fut),
-                    Poll::Ready(None) => {
-                        this.stream.as_mut().set(None);
-                        break;
+                    Poll::Ready(Some(fut)) => {
+                        let wrapped = OrderWrapper {
+                            data: fut,
+                            index: ordered.next_incoming_index,
+                        };
+                        ordered.next_incoming_index += 1;
+
+                        let mut inner: Pin<&mut [_]> = unordered.inner.as_mut();
+                        project_slice(inner.as_mut(), i).set(MaybeUninit::new(wrapped));
+                        unordered.shared.ready.push_sync(i);
+                        continue;
                     }
-                    Poll::Pending => break,
+                    Poll::Ready(None) => this.stream.as_mut().set(None),
+                    Poll::Pending => {}
                 }
-            } else {
-                break;
             }
+            unordered.empty_slots.push(i);
+            break;
         }
 
         // Attempt to pull the next value from the in_progress_queue
-        let res = Pin::new(&mut this.in_progress_queue).poll_next(cx);
+        let res = Pin::new(ordered).poll_next(cx);
         if let Some(val) = ready!(res) {
             return Poll::Ready(Some(val));
         }
@@ -233,23 +244,26 @@ where
 
         // First up, try to spawn off as many futures as possible by filling up
         // our queue of futures.
-        while !this.in_progress_queue.is_full() {
+        let unordered = this.in_progress_queue;
+        while let Some(i) = unordered.empty_slots.pop() {
             if let Some(s) = this.stream.as_mut().as_pin_mut() {
                 match s.poll_next(cx) {
-                    Poll::Ready(Some(fut)) => this.in_progress_queue.push(fut),
-                    Poll::Ready(None) => {
-                        this.stream.as_mut().set(None);
-                        break;
+                    Poll::Ready(Some(fut)) => {
+                        let mut inner: Pin<&mut [_]> = unordered.inner.as_mut();
+                        project_slice(inner.as_mut(), i).set(MaybeUninit::new(fut));
+                        unordered.shared.ready.push_sync(i);
+                        continue;
                     }
-                    Poll::Pending => break,
+                    Poll::Ready(None) => this.stream.as_mut().set(None),
+                    Poll::Pending => {}
                 }
-            } else {
-                break;
             }
+            unordered.empty_slots.push(i);
+            break;
         }
 
         // Attempt to pull the next value from the in_progress_queue
-        match Pin::new(this.in_progress_queue).poll_next(cx) {
+        match Pin::new(unordered).poll_next(cx) {
             x @ (Poll::Pending | Poll::Ready(Some(_))) => return x,
             Poll::Ready(None) => {}
         }

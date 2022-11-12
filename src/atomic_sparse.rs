@@ -108,23 +108,30 @@ impl AtomicSparseSet {
         *self.len.get_mut() = len;
     }
 
-    pub fn push(&mut self, x: usize) {
-        let len = self.len.get_mut();
-        let batch = self.set.len() / 2;
-        if x >= batch || *len == batch {
+    fn split(&mut self) -> (&mut [AtomicUsize], &mut [AtomicUsize]) {
+        self.set.split_at_mut(self.capacity())
+    }
+
+    pub fn contains(&mut self, x: usize) -> bool {
+        let len = *self.len.get_mut();
+
+        let (dense, sparse) = self.split();
+
+        let i = *sparse[x].get_mut();
+        *dense[i].get_mut() == x && i < len
+    }
+
+    pub(crate) fn push(&mut self, x: usize) {
+        if self.contains(x) {
             return;
         }
+        let len = *self.len.get_mut();
+        let (dense, sparse) = self.split();
 
-        let sparse = *self.set[x + batch].get_mut();
-        let dense = *self.set[sparse].get_mut();
+        *sparse[x].get_mut() = len;
+        *dense[len].get_mut() = x;
 
-        if sparse < *len && dense == x {
-            return;
-        }
-
-        *self.set[batch + x].get_mut() = *len;
-        *self.set[*len].get_mut() = x;
-        *len += 1;
+        *self.len.get_mut() += 1;
     }
 
     pub fn pop(&mut self) -> Option<usize> {

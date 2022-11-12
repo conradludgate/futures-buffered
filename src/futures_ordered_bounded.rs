@@ -16,10 +16,10 @@ use pin_project_lite::pin_project;
 pin_project! {
     #[must_use = "futures do nothing unless you `.await` or poll them"]
     #[derive(Debug)]
-    struct OrderWrapper<T> {
+    pub(crate) struct OrderWrapper<T> {
         #[pin]
-        data: T, // A future or a future's output
-        index: isize,
+        pub(crate) data: T, // A future or a future's output
+        pub(crate) index: isize,
     }
 }
 
@@ -96,9 +96,9 @@ where
 /// library is activated, and it is activated by default.
 #[must_use = "streams do nothing unless polled"]
 pub struct FuturesOrderedBounded<T: Future> {
-    in_progress_queue: FuturesUnorderedBounded<OrderWrapper<T>>,
+    pub(crate) in_progress_queue: FuturesUnorderedBounded<OrderWrapper<T>>,
     queued_outputs: BinaryHeap<OrderWrapper<T::Output>>,
-    next_incoming_index: isize,
+    pub(crate) next_incoming_index: isize,
     next_outgoing_index: isize,
 }
 
@@ -130,11 +130,6 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
     /// Returns `true` if the queue contains no futures
     pub fn is_empty(&self) -> bool {
         self.in_progress_queue.is_empty() && self.queued_outputs.is_empty()
-    }
-
-    /// Returns the number of futures that can be contained in the set.
-    pub fn capacity(&self) -> usize {
-        self.in_progress_queue.capacity()
     }
 
     /// Pushes a future to the back of the queue.
@@ -206,10 +201,6 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
         if self.try_push_front(future).is_err() {
             panic!("attempted to push into a full `FuturesOrderedBounded`")
         }
-    }
-
-    pub(crate) fn is_full(&self) -> bool {
-        self.in_progress_queue.is_full()
     }
 }
 
@@ -353,7 +344,6 @@ mod tests {
         let buffer = FuturesOrderedBounded::from_iter((0..10).map(|_| ready(())));
 
         assert_eq!(buffer.len(), 10);
-        assert_eq!(buffer.capacity(), 10);
         assert_eq!(buffer.size_hint(), (10, Some(10)));
     }
 }
