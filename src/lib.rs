@@ -94,6 +94,7 @@
 extern crate alloc;
 
 use core::{future::Future, pin::Pin};
+use futures_core::Stream;
 
 mod arc_slice;
 mod atomic_sparse;
@@ -102,12 +103,14 @@ mod buffered;
 mod futures_ordered_bounded;
 mod futures_unordered_bounded;
 mod join_all;
+mod try_buffered;
 mod try_join_all;
 
-pub use buffered::{BufferUnordered, BufferedStreamExt};
+pub use buffered::{BufferUnordered, BufferedOrdered, BufferedStreamExt};
 pub use futures_ordered_bounded::FuturesOrderedBounded;
 pub use futures_unordered_bounded::FuturesUnorderedBounded;
 pub use join_all::{join_all, JoinAll};
+pub use try_buffered::{BufferedTryStreamExt, TryBufferUnordered, TryBufferedOrdered};
 pub use try_join_all::{try_join_all, TryJoinAll};
 
 fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
@@ -136,6 +139,30 @@ pub trait TryFuture:
 }
 
 impl<T, E, F: ?Sized + Future<Output = Result<T, E>>> TryFuture for F {
+    type Ok = T;
+    type Err = E;
+}
+
+mod private_try_stream {
+    use futures_core::Stream;
+
+    pub trait Sealed {}
+
+    impl<S, T, E> Sealed for S where S: ?Sized + Stream<Item = Result<T, E>> {}
+}
+
+/// A convenience for streams that return `Result` values that includes
+/// a variety of adapters tailored to such futures.
+///
+/// This is [`futures::TryStream`](futures_core::stream::TryStream) except it's stricter on the stream super-trait.
+pub trait TryStream:
+    Stream<Item = Result<Self::Ok, Self::Err>> + private_try_stream::Sealed
+{
+    type Ok;
+    type Err;
+}
+
+impl<T, E, S: ?Sized + Stream<Item = Result<T, E>>> TryStream for S {
     type Ok = T;
     type Err = E;
 }

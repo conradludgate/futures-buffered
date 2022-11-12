@@ -1,21 +1,22 @@
 use core::{
-    future::Future,
     mem::MaybeUninit,
     pin::Pin,
     task::{Context, Poll},
 };
 
-use crate::FuturesUnorderedBounded;
-use crate::{futures_ordered_bounded::OrderWrapper, project_slice, FuturesOrderedBounded};
+use crate::{
+    futures_ordered_bounded::OrderWrapper, project_slice, FuturesOrderedBounded, TryStream,
+};
+use crate::{FuturesUnorderedBounded, TryFuture};
 use futures_core::ready;
 use futures_core::Stream;
 use pin_project_lite::pin_project;
 
-impl<T: ?Sized + Stream> BufferedStreamExt for T {}
+impl<T: ?Sized + TryStream> BufferedTryStreamExt for T {}
 
 /// An extension trait for `Stream`s that provides a variety of convenient
 /// combinator functions.
-pub trait BufferedStreamExt: Stream {
+pub trait BufferedTryStreamExt: TryStream {
     /// An adaptor for creating a buffered list of pending futures.
     ///
     /// If this stream's item can be converted into a future, then this adaptor
@@ -25,12 +26,12 @@ pub trait BufferedStreamExt: Stream {
     /// depending on the state of each future.
     ///
     /// The returned stream will be a stream of each future's output.
-    fn buffered_ordered(self, n: usize) -> BufferedOrdered<Self>
+    fn try_buffered_ordered(self, n: usize) -> TryBufferedOrdered<Self>
     where
-        Self::Item: Future,
+        Self::Ok: TryFuture<Err = Self::Err>,
         Self: Sized,
     {
-        BufferedOrdered {
+        TryBufferedOrdered {
             stream: Some(self),
             in_progress_queue: FuturesOrderedBounded::new(n),
         }
@@ -52,7 +53,7 @@ pub trait BufferedStreamExt: Stream {
     /// # futures::executor::block_on(async {
     /// use futures::channel::oneshot;
     /// use futures::stream::{self, StreamExt};
-    /// use futures_buffered::BufferedStreamExt;
+    /// use futures_buffered::BufferedTryStreamExt;
     ///
     /// let (send_one, recv_one) = oneshot::channel();
     /// let (send_two, recv_two) = oneshot::channel();
@@ -70,13 +71,13 @@ pub trait BufferedStreamExt: Stream {
     /// # Ok::<(), i32>(()) }).unwrap();
     /// ```
     ///
-    /// See [`BufferUnordered`] for performance details
-    fn buffered_unordered(self, n: usize) -> BufferUnordered<Self>
+    /// See [`TryBufferUnordered`] for performance details
+    fn try_buffered_unordered(self, n: usize) -> TryBufferUnordered<Self>
     where
-        Self::Item: Future,
+        Self::Ok: TryFuture<Err = Self::Err>,
         Self: Sized,
     {
-        BufferUnordered {
+        TryBufferUnordered {
             stream: Some(self),
             in_progress_queue: FuturesUnorderedBounded::new(n),
         }
@@ -84,25 +85,25 @@ pub trait BufferedStreamExt: Stream {
 }
 
 pin_project! {
-    /// Stream for the [`buffered_ordered`](BufferedStreamExt::buffered_ordered) method.
+    /// Stream for the [`try_buffered_ordered`](BufferedTryStreamExt::try_buffered_ordered) method.
     #[must_use = "streams do nothing unless polled"]
-    pub struct BufferedOrdered<St>
+    pub struct TryBufferedOrdered<St>
     where
-        St: Stream,
-        St::Item: Future,
+        St: TryStream,
+        St::Ok: TryFuture,
     {
         #[pin]
         stream: Option<St>,
-        in_progress_queue: FuturesOrderedBounded<St::Item>,
+        in_progress_queue: FuturesOrderedBounded<St::Ok>,
     }
 }
 
-impl<St> Stream for BufferedOrdered<St>
+impl<St> Stream for TryBufferedOrdered<St>
 where
-    St: Stream,
-    St::Item: Future,
+    St: TryStream,
+    St::Ok: TryFuture<Err = St::Err>,
 {
-    type Item = <St::Item as Future>::Output;
+    type Item = Result<<St::Ok as TryFuture>::Ok, St::Err>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
@@ -114,7 +115,7 @@ where
         while let Some(i) = unordered.empty_slots.pop() {
             if let Some(s) = this.stream.as_mut().as_pin_mut() {
                 match s.poll_next(cx) {
-                    Poll::Ready(Some(fut)) => {
+                    Poll::Ready(Some(Ok(fut))) => {
                         let wrapped = OrderWrapper {
                             data: fut,
                             index: ordered.next_incoming_index,
@@ -125,6 +126,10 @@ where
                         project_slice(inner.as_mut(), i).set(MaybeUninit::new(wrapped));
                         unordered.shared.ready.push_sync(i);
                         continue;
+                    }
+                    Poll::Ready(Some(Err(err))) => {
+                        unordered.empty_slots.push(i);
+                        return Poll::Ready(Some(Err(err)));
                     }
                     Poll::Ready(None) => this.stream.as_mut().set(None),
                     Poll::Pending => {}
@@ -166,7 +171,7 @@ where
 }
 
 pin_project!(
-    /// Stream for the [`buffered_unordered`](BufferedStreamExt::buffered_unordered)
+    /// Stream for the [`try_buffered_unordered`](BufferedTryStreamExt::try_buffered_unordered)
     /// method.
     ///
     /// # Examples
@@ -175,7 +180,7 @@ pin_project!(
     /// # futures::executor::block_on(async {
     /// use futures::channel::oneshot;
     /// use futures::stream::{self, StreamExt};
-    /// use futures_buffered::BufferedStreamExt;
+    /// use futures_buffered::BufferedTryStreamExt;
     ///
     /// let (send_one, recv_one) = oneshot::channel();
     /// let (send_two, recv_two) = oneshot::channel();
@@ -192,52 +197,20 @@ pin_project!(
     /// assert_eq!(buffered.next().await, None);
     /// # Ok::<(), i32>(()) }).unwrap();
     /// ```
-    ///
-    /// ## Benchmarks
-    ///
-    /// ### Speed
-    ///
-    /// Running 512000 http requests (over an already establish HTTP2 connection) with 256 concurrent jobs
-    /// in a single threaded tokio runtime:
-    ///
-    /// ```text
-    /// futures::stream::BufferUnordered    time:   [214.98 ms 215.90 ms 217.03 ms]
-    /// futures_buffered::BufferUnordered   time:   [203.90 ms 204.48 ms 205.11 ms]
-    /// ```
-    ///
-    /// ### Memory usage
-    ///
-    /// Running 512000 `Ready<i32>` futures with 256 concurrent jobs.
-    ///
-    /// - count: the number of times alloc/dealloc was called
-    /// - alloc: the number of cumulative bytes allocated
-    /// - dealloc: the number of cumulative bytes deallocated
-    ///
-    /// ```text
-    /// futures::stream::BufferUnordered
-    ///     count:    1024002
-    ///     alloc:    40960144 B
-    ///     dealloc:  40960000 B
-    ///
-    /// futures_buffered::BufferUnordered
-    ///     count:    4
-    ///     alloc:    14400 B
-    ///     dealloc:  0 B
-    /// ```
     #[must_use = "streams do nothing unless polled"]
-    pub struct BufferUnordered<S: Stream> {
+    pub struct TryBufferUnordered<S: TryStream> {
         #[pin]
         stream: Option<S>,
-        in_progress_queue: FuturesUnorderedBounded<S::Item>,
+        in_progress_queue: FuturesUnorderedBounded<S::Ok>,
     }
 );
 
-impl<St> Stream for BufferUnordered<St>
+impl<St> Stream for TryBufferUnordered<St>
 where
-    St: Stream,
-    St::Item: Future,
+    St: TryStream,
+    St::Ok: TryFuture<Err = St::Err>,
 {
-    type Item = <St::Item as Future>::Output;
+    type Item = Result<<St::Ok as TryFuture>::Ok, St::Err>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
@@ -248,11 +221,15 @@ where
         while let Some(i) = unordered.empty_slots.pop() {
             if let Some(s) = this.stream.as_mut().as_pin_mut() {
                 match s.poll_next(cx) {
-                    Poll::Ready(Some(fut)) => {
+                    Poll::Ready(Some(Ok(fut))) => {
                         let mut inner: Pin<&mut [_]> = unordered.inner.as_mut();
                         project_slice(inner.as_mut(), i).set(MaybeUninit::new(fut));
                         unordered.shared.ready.push_sync(i);
                         continue;
+                    }
+                    Poll::Ready(Some(Err(err))) => {
+                        unordered.empty_slots.push(i);
+                        return Poll::Ready(Some(Err(err)));
                     }
                     Poll::Ready(None) => this.stream.as_mut().set(None),
                     Poll::Pending => {}
@@ -296,79 +273,99 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+    use core::task::Poll;
+    use futures::{
+        channel::oneshot::{self, Canceled},
+        stream, TryFutureExt, TryStreamExt,
+    };
     use futures_test::task::noop_context;
+
+    fn _else(_: Canceled) -> Result<i32, i32> {
+        Ok(0)
+    }
 
     #[test]
     fn buffered_ordered() {
-        use crate::BufferedStreamExt;
-        use futures::channel::oneshot;
-        use futures::stream;
-
         let (send_one, recv_one) = oneshot::channel();
         let (send_two, recv_two) = oneshot::channel();
 
-        let stream_of_futures = stream::iter(vec![recv_one, recv_two]);
-        let mut buffered = stream_of_futures.buffered_ordered(10);
+        let stream_of_futures = stream::iter(vec![
+            Ok(recv_one.unwrap_or_else(_else)),
+            Err(0),
+            Ok(recv_two.unwrap_or_else(_else)),
+        ]);
+        let mut buffered = stream_of_futures.try_buffered_ordered(10);
         let mut cx = noop_context();
 
         // sized properly
-        assert_eq!(buffered.size_hint(), (2, Some(2)));
+        assert_eq!(buffered.size_hint(), (3, Some(3)));
+
+        // stream errors upfront
+        assert_eq!(
+            buffered.try_poll_next_unpin(&mut cx),
+            Poll::Ready(Some(Err(0)))
+        );
 
         // make sure it returns pending
-        assert_eq!(buffered.poll_next_unpin(&mut cx), Poll::Pending);
+        assert_eq!(buffered.try_poll_next_unpin(&mut cx), Poll::Pending);
 
         // returns in a fixed order
-        send_two.send(2i32).unwrap();
-        assert_eq!(buffered.poll_next_unpin(&mut cx), Poll::Pending);
+        send_two.send(Ok(2)).unwrap();
+        assert_eq!(buffered.try_poll_next_unpin(&mut cx), Poll::Pending);
 
-        send_one.send(1i32).unwrap();
+        send_one.send(Err(1)).unwrap();
         assert_eq!(
-            buffered.poll_next_unpin(&mut cx),
-            Poll::Ready(Some(Ok(1i32)))
+            buffered.try_poll_next_unpin(&mut cx),
+            Poll::Ready(Some(Err(1)))
         );
         assert_eq!(
-            buffered.poll_next_unpin(&mut cx),
-            Poll::Ready(Some(Ok(2i32)))
+            buffered.try_poll_next_unpin(&mut cx),
+            Poll::Ready(Some(Ok(2)))
         );
 
         // completes properly
-        assert_eq!(buffered.poll_next_unpin(&mut cx), Poll::Ready(None));
+        assert_eq!(buffered.try_poll_next_unpin(&mut cx), Poll::Ready(None));
     }
 
     #[test]
     fn buffered_unordered() {
-        use crate::BufferedStreamExt;
-        use futures::channel::oneshot;
-        use futures::stream;
-
         let (send_one, recv_one) = oneshot::channel();
         let (send_two, recv_two) = oneshot::channel();
 
-        let stream_of_futures = stream::iter(vec![recv_one, recv_two]);
-        let mut buffered = stream_of_futures.buffered_unordered(10);
+        let stream_of_futures = stream::iter(vec![
+            Ok(recv_one.unwrap_or_else(_else)),
+            Err(0),
+            Ok(recv_two.unwrap_or_else(_else)),
+        ]);
+        let mut buffered = stream_of_futures.try_buffered_unordered(10);
         let mut cx = noop_context();
 
         // sized properly
-        assert_eq!(buffered.size_hint(), (2, Some(2)));
+        assert_eq!(buffered.size_hint(), (3, Some(3)));
 
-        // make sure it returns pending
-        assert_eq!(buffered.poll_next_unpin(&mut cx), Poll::Pending);
-
-        // returns in any order
-        send_two.send(2i32).unwrap();
+        // stream errors upfront
         assert_eq!(
-            buffered.poll_next_unpin(&mut cx),
-            Poll::Ready(Some(Ok(2i32)))
+            buffered.try_poll_next_unpin(&mut cx),
+            Poll::Ready(Some(Err(0)))
         );
 
-        send_one.send(1i32).unwrap();
+        // make sure it returns pending
+        assert_eq!(buffered.try_poll_next_unpin(&mut cx), Poll::Pending);
+
+        // returns in any order
+        send_two.send(Ok(2)).unwrap();
         assert_eq!(
-            buffered.poll_next_unpin(&mut cx),
-            Poll::Ready(Some(Ok(1i32)))
+            buffered.try_poll_next_unpin(&mut cx),
+            Poll::Ready(Some(Ok(2)))
+        );
+
+        send_one.send(Ok(1)).unwrap();
+        assert_eq!(
+            buffered.try_poll_next_unpin(&mut cx),
+            Poll::Ready(Some(Ok(1)))
         );
 
         // completes properly
-        assert_eq!(buffered.poll_next_unpin(&mut cx), Poll::Ready(None));
+        assert_eq!(buffered.try_poll_next_unpin(&mut cx), Poll::Ready(None));
     }
 }
