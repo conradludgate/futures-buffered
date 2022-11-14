@@ -4,17 +4,12 @@ use core::{
     mem::{align_of, ManuallyDrop},
     ops::Deref,
     ptr::{self, drop_in_place, NonNull},
-    sync::atomic,
+    sync::atomic::{self, AtomicUsize},
     task::{RawWaker, RawWakerVTable, Waker},
 };
+use futures_util::task::AtomicWaker;
 
-#[cfg(loom)]
-pub(crate) use loom::sync::atomic::AtomicUsize;
-
-#[cfg(not(loom))]
-pub(crate) use core::sync::atomic::AtomicUsize;
-
-use crate::{atomic_sparse::AtomicSparseSet, atomic_waker::AtomicWaker};
+use crate::atomic_sparse::AtomicSparseSet;
 
 /// [`ArcSlice`] is a fun optimisation. For `FuturesUnorderedBounded`, we have `n` slots for futures,
 /// and we create a separate context when polling each individual future to avoid having n^2 polling.

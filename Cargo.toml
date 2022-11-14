@@ -15,22 +15,17 @@ bench = false
 
 [dependencies]
 futures-core = "0.3.21"
+futures-util = "0.3.21"
 pin-project-lite = "0.2"
-bitvec = "1"
 
 [dev-dependencies]
 futures = "0.3.21"
 futures-test = "0.3.21"
 
-[[bench]]
-name = "batch"
-harness = false
-
-[target.'cfg(loom)'.dependencies]
-loom = { version = "0.5", features = ["checkpoint"] }
-
-# for some reason, these were causing trouble with loom
-[target.'cfg(not(loom))'.dev-dependencies]
 criterion = { version = "0.4" }
 hyper = { version = "0.14", features = ["client", "http2", "tcp"] }
 tokio = { version = "1", features = ["full", "macros"] }
+
+[[bench]]
+name = "batch"
+harness = false

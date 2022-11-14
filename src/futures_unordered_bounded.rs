@@ -1,14 +1,11 @@
-use alloc::{boxed::Box, vec::Vec};
 use core::{
     fmt,
     future::Future,
-    mem::MaybeUninit,
     pin::Pin,
-    ptr::drop_in_place,
     task::{Context, Poll},
 };
 
-use crate::{arc_slice::ArcSlice, atomic_sparse::AtomicSparseSet, project_slice};
+use crate::{arc_slice::ArcSlice, slot_map::SlotMap};
 use futures_core::{FusedStream, Stream};
 
 /// A set of futures which may complete in any order.
@@ -104,10 +101,10 @@ use futures_core::{FusedStream, Stream};
 /// # Ok(()) }
 /// ```
 pub struct FuturesUnorderedBounded<F> {
-    pub(crate) empty_slots: AtomicSparseSet,
-    pub(crate) inner: Pin<Box<[MaybeUninit<F>]>>,
+    pub(crate) tasks: SlotMap<F>,
     pub(crate) shared: ArcSlice,
 }
+
 impl<F> Unpin for FuturesUnorderedBounded<F> {}
 
 impl<F> FuturesUnorderedBounded<F> {
@@ -117,21 +114,9 @@ impl<F> FuturesUnorderedBounded<F> {
     /// In this state, [`FuturesUnorderedBounded::poll_next`](Stream::poll_next) will
     /// return [`Poll::Ready(None)`](Poll::Ready).
     pub fn new(cap: usize) -> Self {
-        // create the shared data that is part of the queue and
-        // the wakers
-        let shared = ArcSlice::new(cap);
-
-        // create the task buffer + empty_slot stack
-        let mut v: Vec<MaybeUninit<F>> = Vec::with_capacity(cap);
-        v.resize_with(cap, MaybeUninit::uninit);
-
-        let mut empty_slots = AtomicSparseSet::new(cap);
-        empty_slots.init();
-
         Self {
-            inner: v.into_boxed_slice().into(),
-            shared,
-            empty_slots,
+            tasks: SlotMap::new(cap),
+            shared: ArcSlice::new(cap),
         }
     }
 
@@ -144,6 +129,7 @@ impl<F> FuturesUnorderedBounded<F> {
     ///
     /// # Panics
     /// This method will panic if the buffer is currently full. See [`FuturesUnorderedBounded::try_push`] to get a result instead
+    #[track_caller]
     pub fn push(&mut self, fut: F) {
         if self.try_push(fut).is_err() {
             panic!("attempted to push into a full `FuturesUnorderedBounded`")
@@ -164,35 +150,27 @@ impl<F> FuturesUnorderedBounded<F> {
     }
 
     #[inline]
-    pub(crate) fn try_push_with<T>(&mut self, t: T, mut f: impl FnMut(T) -> F) -> Result<(), T> {
-        let mut inner: Pin<&mut [MaybeUninit<F>]> = self.inner.as_mut();
-        if let Some(i) = self.empty_slots.pop() {
-            // if there's a slot available, push the future in
-            // and mark it as ready for polling
-            project_slice(inner.as_mut(), i).set(MaybeUninit::new(f(t)));
-            self.shared.ready.push_sync(i);
-            Ok(())
-        } else {
-            // if no slots, return back the future
-            Err(t)
-        }
+    pub(crate) fn try_push_with<T>(&mut self, t: T, f: impl FnMut(T) -> F) -> Result<(), T> {
+        let i = self.tasks.insert_with(t, f)?;
+        self.shared.ready.push_sync(i);
+        Ok(())
     }
 
     /// Returns `true` if the set contains no futures.
     pub fn is_empty(&self) -> bool {
-        self.inner.len() == self.empty_slots.len()
+        self.tasks.is_empty()
     }
 
     /// Returns the number of futures contained in the set.
     ///
     /// This represents the total number of in-flight futures.
     pub fn len(&self) -> usize {
-        self.inner.len() - self.empty_slots.len()
+        self.tasks.len()
     }
 
     /// Returns the number of futures that can be contained in the set.
     pub fn capacity(&self) -> usize {
-        self.inner.len()
+        self.tasks.capacity()
     }
 }
 
@@ -201,21 +179,14 @@ impl<F: Future> FuturesUnorderedBounded<F> {
         self.shared.waker.register(cx.waker());
 
         while let Some(i) = self.shared.ready.pop_sync() {
-            if !self.empty_slots.contains(i) {
-                let mut inner = self.inner.as_mut();
-
+            if let Some(task) = self.tasks.get(i) {
                 let waker = self.shared.get(i).waker();
                 let mut cx = Context::from_waker(&waker);
 
-                // SAFETY: Since our empty_slots **doesnt** contain this index, we know it must be init.
-                let task = project_slice(inner.as_mut(), i);
-                let mut task = unsafe { task.map_unchecked_mut(|f| f.assume_init_mut()) };
-
-                let res = task.as_mut().poll(&mut cx);
+                let res = task.poll(&mut cx);
 
                 if let Poll::Ready(x) = res {
-                    self.empty_slots.push(i);
-                    unsafe { drop_in_place(task.get_unchecked_mut()) }
+                    self.tasks.remove(i);
                     return Poll::Ready(Some((i, x)));
                 }
             }
@@ -294,11 +265,10 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
     /// ```
     fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
         // store the futures in our task list
-        let inner: Box<[MaybeUninit<F>]> = iter.into_iter().map(MaybeUninit::new).collect();
+        let tasks = SlotMap::from_iter(iter);
 
         // determine the actual capacity and create the shared state
-        let cap = inner.len();
-        let empty_slots = AtomicSparseSet::new(cap);
+        let cap = tasks.len();
         let mut shared = ArcSlice::new(cap);
         // we know that we haven't cloned this arc before, since it was created just above
         let meta = unsafe { shared.get_mut_unchecked() };
@@ -307,11 +277,7 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
         meta.ready.init();
 
         // create the queue
-        Self {
-            inner: inner.into(),
-            shared,
-            empty_slots,
-        }
+        Self { tasks, shared }
     }
 }
 

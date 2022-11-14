@@ -3,6 +3,7 @@ use alloc::collections::binary_heap::{BinaryHeap, PeekMut};
 use core::cmp::Ordering;
 use core::fmt;
 use core::iter::FromIterator;
+use core::num::Wrapping;
 use core::pin::Pin;
 use futures_core::future::Future;
 use futures_core::ready;
@@ -19,7 +20,7 @@ pin_project! {
     pub(crate) struct OrderWrapper<T> {
         #[pin]
         pub(crate) data: T, // A future or a future's output
-        pub(crate) index: isize,
+        pub(crate) index: usize,
     }
 }
 
@@ -98,8 +99,8 @@ where
 pub struct FuturesOrderedBounded<T: Future> {
     pub(crate) in_progress_queue: FuturesUnorderedBounded<OrderWrapper<T>>,
     queued_outputs: BinaryHeap<OrderWrapper<T::Output>>,
-    pub(crate) next_incoming_index: isize,
-    next_outgoing_index: isize,
+    pub(crate) next_incoming_index: Wrapping<usize>,
+    next_outgoing_index: Wrapping<usize>,
 }
 
 impl<T: Future> Unpin for FuturesOrderedBounded<T> {}
@@ -112,9 +113,9 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
     pub fn new(capacity: usize) -> Self {
         Self {
             in_progress_queue: FuturesUnorderedBounded::new(capacity),
-            queued_outputs: BinaryHeap::new(),
-            next_incoming_index: 0,
-            next_outgoing_index: 0,
+            queued_outputs: BinaryHeap::with_capacity(capacity - 1),
+            next_incoming_index: Wrapping(0),
+            next_outgoing_index: Wrapping(0),
         }
     }
 
@@ -145,7 +146,7 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
         self.in_progress_queue.try_push_with(future, |future| {
             let wrapped = OrderWrapper {
                 data: future,
-                index: self.next_incoming_index,
+                index: self.next_incoming_index.0,
             };
             self.next_incoming_index += 1;
             wrapped
@@ -167,7 +168,7 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
             self.next_outgoing_index -= 1;
             OrderWrapper {
                 data: future,
-                index: self.next_outgoing_index,
+                index: self.next_outgoing_index.0,
             }
         })
     }
@@ -181,6 +182,7 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
     ///
     /// # Panics
     /// This method will panic if the buffer is currently full. See [`FuturesOrderedBounded::try_push_back`] to get a result instead
+    #[track_caller]
     pub fn push_back(&mut self, future: Fut) {
         if self.try_push_back(future).is_err() {
             panic!("attempted to push into a full `FuturesOrderedBounded`")
@@ -197,6 +199,7 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
     ///
     /// # Panics
     /// This method will panic if the buffer is currently full. See [`FuturesOrderedBounded::try_push_front`] to get a result instead
+    #[track_caller]
     pub fn push_front(&mut self, future: Fut) {
         if self.try_push_front(future).is_err() {
             panic!("attempted to push into a full `FuturesOrderedBounded`")
@@ -210,9 +213,26 @@ impl<Fut: Future> Stream for FuturesOrderedBounded<Fut> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
 
+        const MSB: usize = !(usize::MAX >> 1);
+        // house keeping if the indices gets too high
+        if this.next_outgoing_index.0 & MSB == MSB {
+            let mut ready_queue = core::mem::take(&mut this.queued_outputs).into_vec();
+            for entry in &mut ready_queue {
+                entry.index ^= MSB;
+            }
+            this.queued_outputs = ready_queue.into();
+
+            for task in this.in_progress_queue.tasks.iter_mut() {
+                *task.project().index ^= MSB;
+            }
+
+            this.next_outgoing_index.0 ^= MSB;
+            this.next_incoming_index.0 ^= MSB;
+        }
+
         // Check to see if we've already received the next value
         if let Some(next_output) = this.queued_outputs.peek_mut() {
-            if next_output.index == this.next_outgoing_index {
+            if next_output.index == this.next_outgoing_index.0 {
                 this.next_outgoing_index += 1;
                 return Poll::Ready(Some(PeekMut::pop(next_output).data));
             }
@@ -221,7 +241,7 @@ impl<Fut: Future> Stream for FuturesOrderedBounded<Fut> {
         loop {
             match ready!(Pin::new(&mut this.in_progress_queue).poll_next(cx)) {
                 Some(output) => {
-                    if output.index == this.next_outgoing_index {
+                    if output.index == this.next_outgoing_index.0 {
                         this.next_outgoing_index += 1;
                         return Poll::Ready(Some(output.data));
                     } else {
@@ -250,19 +270,19 @@ impl<Fut: Future> FromIterator<Fut> for FuturesOrderedBounded<Fut> {
     where
         T: IntoIterator<Item = Fut>,
     {
-        let mut index = 0;
+        let mut index = Wrapping(0);
         let in_progress_queue = FuturesUnorderedBounded::from_iter(iter.into_iter().map(|data| {
-            let next_index = index + 1;
+            let next_index = index + Wrapping(1);
             OrderWrapper {
                 data,
-                index: core::mem::replace(&mut index, next_index),
+                index: core::mem::replace(&mut index, next_index).0,
             }
         }));
         Self {
             in_progress_queue,
             queued_outputs: BinaryHeap::new(),
             next_incoming_index: index,
-            next_outgoing_index: 0,
+            next_outgoing_index: Wrapping(0),
         }
     }
 }

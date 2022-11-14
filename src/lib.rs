@@ -93,16 +93,16 @@
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
-use core::{future::Future, pin::Pin};
+use core::future::Future;
 use futures_core::Stream;
 
 mod arc_slice;
 mod atomic_sparse;
-mod atomic_waker;
 mod buffered;
 mod futures_ordered_bounded;
 mod futures_unordered_bounded;
 mod join_all;
+mod slot_map;
 mod try_buffered;
 mod try_join_all;
 
@@ -112,12 +112,6 @@ pub use futures_unordered_bounded::FuturesUnorderedBounded;
 pub use join_all::{join_all, JoinAll};
 pub use try_buffered::{BufferedTryStreamExt, TryBufferUnordered, TryBufferedOrdered};
 pub use try_join_all::{try_join_all, TryJoinAll};
-
-fn project_slice<T>(slice: Pin<&mut [T]>, i: usize) -> Pin<&mut T> {
-    // SAFETY: slice fields are pinned since the whole slice is pinned
-    // <https://discord.com/channels/273534239310479360/818964227783262209/1035563044887072808>
-    unsafe { slice.map_unchecked_mut(|futs| &mut futs[i]) }
-}
 
 mod private_try_future {
     use core::future::Future;

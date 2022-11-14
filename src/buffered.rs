@@ -1,12 +1,11 @@
 use core::{
     future::Future,
-    mem::MaybeUninit,
     pin::Pin,
     task::{Context, Poll},
 };
 
+use crate::FuturesOrderedBounded;
 use crate::FuturesUnorderedBounded;
-use crate::{futures_ordered_bounded::OrderWrapper, project_slice, FuturesOrderedBounded};
 use futures_core::ready;
 use futures_core::Stream;
 use pin_project_lite::pin_project;
@@ -110,27 +109,17 @@ where
         // First up, try to spawn off as many futures as possible by filling up
         // our queue of futures.
         let ordered = this.in_progress_queue;
-        let unordered = &mut ordered.in_progress_queue;
-        while let Some(i) = unordered.empty_slots.pop() {
+        while ordered.in_progress_queue.tasks.len() < ordered.in_progress_queue.tasks.capacity() {
             if let Some(s) = this.stream.as_mut().as_pin_mut() {
                 match s.poll_next(cx) {
                     Poll::Ready(Some(fut)) => {
-                        let wrapped = OrderWrapper {
-                            data: fut,
-                            index: ordered.next_incoming_index,
-                        };
-                        ordered.next_incoming_index += 1;
-
-                        let mut inner: Pin<&mut [_]> = unordered.inner.as_mut();
-                        project_slice(inner.as_mut(), i).set(MaybeUninit::new(wrapped));
-                        unordered.shared.ready.push_sync(i);
+                        ordered.push_back(fut);
                         continue;
                     }
                     Poll::Ready(None) => this.stream.as_mut().set(None),
                     Poll::Pending => {}
                 }
             }
-            unordered.empty_slots.push(i);
             break;
         }
 
@@ -245,20 +234,17 @@ where
         // First up, try to spawn off as many futures as possible by filling up
         // our queue of futures.
         let unordered = this.in_progress_queue;
-        while let Some(i) = unordered.empty_slots.pop() {
+        while unordered.tasks.len() < unordered.tasks.capacity() {
             if let Some(s) = this.stream.as_mut().as_pin_mut() {
                 match s.poll_next(cx) {
                     Poll::Ready(Some(fut)) => {
-                        let mut inner: Pin<&mut [_]> = unordered.inner.as_mut();
-                        project_slice(inner.as_mut(), i).set(MaybeUninit::new(fut));
-                        unordered.shared.ready.push_sync(i);
+                        unordered.push(fut);
                         continue;
                     }
                     Poll::Ready(None) => this.stream.as_mut().set(None),
                     Poll::Pending => {}
                 }
             }
-            unordered.empty_slots.push(i);
             break;
         }
 
@@ -296,15 +282,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+    use futures::{channel::oneshot, stream, StreamExt};
     use futures_test::task::noop_context;
 
     #[test]
     fn buffered_ordered() {
-        use crate::BufferedStreamExt;
-        use futures::channel::oneshot;
-        use futures::stream;
-
         let (send_one, recv_one) = oneshot::channel();
         let (send_two, recv_two) = oneshot::channel();
 
@@ -338,10 +320,6 @@ mod tests {
 
     #[test]
     fn buffered_unordered() {
-        use crate::BufferedStreamExt;
-        use futures::channel::oneshot;
-        use futures::stream;
-
         let (send_one, recv_one) = oneshot::channel();
         let (send_two, recv_two) = oneshot::channel();
 
