@@ -16,8 +16,8 @@
 //! in a single threaded tokio runtime:
 //!
 //! ```text
-//! FuturesUnordered         time:   [204.44 ms 205.47 ms 206.61 ms]
-//! FuturesUnorderedBounded  time:   [191.92 ms 192.52 ms 193.15 ms]
+//! FuturesUnordered         time:   [196.26 ms 197.02 ms 197.80 ms]
+//! FuturesUnorderedBounded  time:   [180.95 ms 181.86 ms 183.11 ms]
 //! ```
 //!
 //! ### Memory usage
@@ -35,8 +35,8 @@
 //!     dealloc:  40960000 B
 //!
 //! FuturesUnorderedBounded
-//!     count:    4
-//!     alloc:    14400 B
+//!     count:    2
+//!     alloc:    8264 B
 //!     dealloc:  0 B
 //! ```
 //!

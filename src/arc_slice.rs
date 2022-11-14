@@ -189,7 +189,7 @@ impl ArcSlot {
     ///
     /// # Safety:
     /// `ptr` must be from an `ArcSlot` originally
-    unsafe fn meta_raw_ptr(ptr: *mut ArcSlotInner) -> *mut ArcSliceInnerMeta {
+    unsafe fn meta_raw(ptr: *mut ArcSlotInner) -> *mut ArcSliceInnerMeta {
         fn padding_needed_for(layout: &Layout, align: usize) -> usize {
             let len = layout.size();
 
@@ -230,8 +230,8 @@ impl ArcSlot {
     /// # Safety:
     /// * `ptr` must be from an `ArcSlot` originally
     /// * The original `ArcSlot` must outlive `'a`
-    unsafe fn meta_raw<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInnerMeta {
-        unsafe { &*Self::meta_raw_ptr(ptr as *mut ArcSlotInner) }
+    unsafe fn meta_ref<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInnerMeta {
+        unsafe { &*Self::meta_raw(ptr as *mut ArcSlotInner) }
     }
 
     /// Traverses back the [`ArcSlice`] to find the [`ArcSliceInner`] pointer
@@ -239,9 +239,9 @@ impl ArcSlot {
     /// # Safety:
     /// * `ptr` must be from an `ArcSlot` originally
     /// * The original `ArcSlot` must outlive `'a`
-    unsafe fn inner_raw<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInner {
-        let ptr = Self::meta_raw(ptr);
-        let len = *core::ptr::addr_of!(ptr.len);
+    unsafe fn inner_ref<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInner {
+        let ptr = Self::meta_raw(ptr as *mut ArcSlotInner);
+        let len = *core::ptr::addr_of!((*ptr).len);
 
         let ptr = ptr as *const ArcSliceInnerMeta as *const ArcSlotInner;
         &*(ptr::slice_from_raw_parts(ptr, len + 1) as *const ArcSliceInner)
@@ -250,7 +250,7 @@ impl ArcSlot {
     fn meta(&self) -> &ArcSliceInnerMeta {
         // SAFETY: `self.ptr` is clearly from an `ArcSlot`, and the output lifetime is the same
         // as the input lifetime
-        unsafe { Self::meta_raw(self.ptr.as_ptr()) }
+        unsafe { Self::meta_ref(self.ptr.as_ptr()) }
     }
 
     pub(crate) fn waker(self) -> Waker {
@@ -259,7 +259,7 @@ impl ArcSlot {
 
         // Increment the reference count of the arc to clone it.
         unsafe fn clone_waker(waker: *const ()) -> RawWaker {
-            ArcSlot::meta_raw(waker.cast()).inc_strong();
+            ArcSlot::meta_ref(waker.cast()).inc_strong();
             RawWaker::new(waker, &VTABLE)
         }
 
@@ -273,7 +273,7 @@ impl ArcSlot {
         // then call the stored waker to trigger a poll
         unsafe fn wake_by_ref(waker: *const ()) {
             let slot = waker.cast();
-            let inner = ArcSlot::inner_raw(slot);
+            let inner = ArcSlot::inner_ref(slot);
             inner.push((*slot).index);
             inner.meta.waker.wake();
         }
@@ -388,7 +388,7 @@ impl Drop for ArcSlot {
     fn drop(&mut self) {
         let meta = self.meta();
         if meta.dec_strong() {
-            unsafe { drop_inner(ArcSlot::meta_raw_ptr(self.ptr.as_ptr()), meta.len) }
+            unsafe { drop_inner(ArcSlot::meta_raw(self.ptr.as_ptr()), meta.len) }
         }
     }
 }

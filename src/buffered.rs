@@ -190,8 +190,8 @@ pin_project!(
     /// in a single threaded tokio runtime:
     ///
     /// ```text
-    /// futures::stream::BufferUnordered    time:   [214.98 ms 215.90 ms 217.03 ms]
-    /// futures_buffered::BufferUnordered   time:   [203.90 ms 204.48 ms 205.11 ms]
+    /// futures::stream::BufferUnordered    time:   [202.72 ms 203.34 ms 204.02 ms]
+    /// futures_buffered::BufferUnordered   time:   [226.67 ms 227.42 ms 228.26 ms]
     /// ```
     ///
     /// ### Memory usage
@@ -209,8 +209,8 @@ pin_project!(
     ///     dealloc:  40960000 B
     ///
     /// futures_buffered::BufferUnordered
-    ///     count:    4
-    ///     alloc:    14400 B
+    ///     count:    2
+    ///     alloc:    8264 B
     ///     dealloc:  0 B
     /// ```
     #[must_use = "streams do nothing unless polled"]

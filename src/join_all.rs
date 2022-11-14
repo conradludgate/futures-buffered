@@ -44,8 +44,8 @@ impl<F: Future> Unpin for JoinAll<F> {}
 /// Running 256 http requests (over an already establish HTTP2 connection) in a single threaded tokio runtime:
 ///
 /// ```text
-/// futures::future::join_all   time:   [746.38 µs 749.82 µs 753.38 µs]
-/// futures_buffered::join_all  time:   [654.01 µs 666.69 µs 682.90 µs]
+/// futures::future::join_all   time:   [729.30 µs 735.51 µs 742.39 µs]
+/// futures_buffered::join_all  time:   [617.72 µs 621.99 µs 626.72 µs]
 /// ```
 ///
 /// ### Memory usage
@@ -63,9 +63,9 @@ impl<F: Future> Unpin for JoinAll<F> {}
 ///     dealloc:  26744 B
 ///
 /// futures_buffered::join_all
-///     count:    10
-///     alloc:    16448 B
-///     dealloc:  16448 B
+///     count:    6
+///     alloc:    10312 B
+///     dealloc:  10312 B
 /// ```
 pub fn join_all<I>(iter: I) -> JoinAll<<I as IntoIterator>::Item>
 where
