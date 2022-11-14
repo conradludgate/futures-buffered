@@ -152,7 +152,7 @@ impl<F> FuturesUnorderedBounded<F> {
     #[inline]
     pub(crate) fn try_push_with<T>(&mut self, t: T, f: impl FnMut(T) -> F) -> Result<(), T> {
         let i = self.tasks.insert_with(t, f)?;
-        self.shared.ready.push_sync(i);
+        self.shared.push(i);
         Ok(())
     }
 
@@ -176,9 +176,19 @@ impl<F> FuturesUnorderedBounded<F> {
 
 impl<F: Future> FuturesUnorderedBounded<F> {
     pub(crate) fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
-        self.shared.waker.register(cx.waker());
+        self.shared.meta.waker.register(cx.waker());
 
-        while let Some(i) = self.shared.ready.pop_sync() {
+        loop {
+            let i = unsafe { self.shared.pop() };
+            // empty
+            if i == self.tasks.capacity() {
+                break;
+            }
+            // inconsistent
+            if i > self.tasks.capacity() {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             if let Some(task) = self.tasks.get(i) {
                 let waker = self.shared.get(i).waker();
                 let mut cx = Context::from_waker(&waker);
@@ -269,12 +279,17 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
 
         // determine the actual capacity and create the shared state
         let cap = tasks.len();
-        let mut shared = ArcSlice::new(cap);
-        // we know that we haven't cloned this arc before, since it was created just above
-        let meta = unsafe { shared.get_mut_unchecked() };
+        let shared = ArcSlice::new(cap);
 
-        // register the shared state on our tasks
-        meta.ready.init();
+        for i in 0..cap {
+            shared.push(i);
+        }
+
+        // // we know that we haven't cloned this arc before, since it was created just above
+        // let meta = unsafe { shared.get_mut_unchecked() };
+
+        // // register the shared state on our tasks
+        // meta.push_all();
 
         // create the queue
         Self { tasks, shared }
@@ -290,47 +305,6 @@ impl<Fut: Future> FusedStream for FuturesUnorderedBounded<Fut> {
 impl<Fut: Future> fmt::Debug for FuturesUnorderedBounded<Fut> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FuturesUnorderedBounded {{ ... }}")
-    }
-}
-
-#[cfg(test)]
-#[cfg(loom)]
-mod loom_tests {
-    use super::FuturesUnorderedBounded;
-    use futures::channel::oneshot;
-    use futures::FutureExt;
-    use futures::StreamExt;
-    use loom::thread;
-
-    #[test]
-    fn test_concurrent_logic() {
-        loom::model(|| {
-            let mut set = FuturesUnorderedBounded::new(2);
-            let (tx1, rx1) = oneshot::channel();
-            let (tx2, rx2) = oneshot::channel();
-            set.push(rx1);
-            set.push(rx2);
-
-            assert_eq!(set.next().now_or_never(), None);
-
-            thread::spawn(|| {
-                tx1.send(());
-            });
-
-            thread::spawn(|| {
-                tx2.send(());
-            });
-
-            let mut count = 0;
-            while count < 2 {
-                match set.next().now_or_never() {
-                    None => {}
-                    Some(Some(Ok(()))) => count += 1,
-                    Some(_) => panic!("completed early"),
-                }
-            }
-            assert_eq!(set.next().now_or_never(), Some(None));
-        });
     }
 }
 

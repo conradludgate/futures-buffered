@@ -107,15 +107,15 @@ mod tests {
     #[test]
     fn try_join_all() {
         let x = futures::executor::block_on(crate::try_join_all(
-            (0..10).map(|_| ready(Result::<_, ()>::Ok(1))),
+            (0..10).map(|i| ready(Result::<_, ()>::Ok(i))),
         ))
         .unwrap();
 
-        assert_eq!(x.len(), 10);
+        assert_eq!(x, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(x.capacity(), 10);
 
         futures::executor::block_on(crate::try_join_all(
-            (0..10).map(|i| ready(if i == 9 { Err(()) } else { Ok(1) })),
+            (0..10).map(|i| ready(if i == 9 { Err(()) } else { Ok(i) })),
         ))
         .unwrap_err();
     }

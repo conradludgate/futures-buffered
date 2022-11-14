@@ -1,5 +1,6 @@
 use alloc::alloc::{dealloc, handle_alloc_error, Layout};
 use core::{
+    cell::UnsafeCell,
     marker::PhantomData,
     mem::{align_of, ManuallyDrop},
     ops::Deref,
@@ -8,8 +9,6 @@ use core::{
     task::{RawWaker, RawWakerVTable, Waker},
 };
 use futures_util::task::AtomicWaker;
-
-use crate::atomic_sparse::AtomicSparseSet;
 
 /// [`ArcSlice`] is a fun optimisation. For `FuturesUnorderedBounded`, we have `n` slots for futures,
 /// and we create a separate context when polling each individual future to avoid having n^2 polling.
@@ -45,25 +44,36 @@ pub(crate) struct ArcSlice {
 #[repr(C)]
 pub(crate) struct ArcSliceInner {
     pub(crate) meta: ArcSliceInnerMeta,
-    slice: [usize],
+    slice: [ArcSlotInner],
 }
 
-#[repr(C)]
 pub(crate) struct ArcSliceInnerMeta {
     strong: AtomicUsize,
-    pub(crate) ready: AtomicSparseSet,
+    len: usize,
+    list_head: AtomicUsize,
+    list_tail: UnsafeCell<usize>,
     pub(crate) waker: AtomicWaker,
 }
 
 pub(crate) struct ArcSlot {
-    ptr: NonNull<usize>,
+    ptr: NonNull<ArcSlotInner>,
     phantom: PhantomData<ArcSliceInner>,
+}
+
+// This is repr(C) to future-proof against possible field-reordering, which
+// would interfere with otherwise safe [into|from]_raw() of transmutable
+// inner types.
+#[repr(C)]
+pub(crate) struct ArcSlotInner {
+    index: usize,
+    next: AtomicUsize,
 }
 
 const fn __assert_send_sync<T: Send + Sync>() {}
 const _: () = {
-    __assert_send_sync::<ArcSliceInnerMeta>();
-    __assert_send_sync::<usize>();
+    // SyncUnsafeCell :ferrisPlead:
+    // __assert_send_sync::<ArcSliceInnerMeta>();
+    __assert_send_sync::<ArcSlotInner>();
 
     // SAFETY: The contents of the ArcSlice are Send+Sync
     unsafe impl Send for ArcSlice {}
@@ -73,7 +83,7 @@ const _: () = {
 };
 
 impl Deref for ArcSlice {
-    type Target = ArcSliceInnerMeta;
+    type Target = ArcSliceInner;
 
     fn deref(&self) -> &Self::Target {
         // This unsafety is ok because while this arc is alive we're guaranteed
@@ -81,22 +91,22 @@ impl Deref for ArcSlice {
         // `ArcInner` structure itself is `Sync` because the inner data is
         // `Sync` as well, so we're ok loaning out an immutable pointer to these
         // contents.
-        &unsafe { self.ptr.as_ref() }.meta
+        unsafe { self.ptr.as_ref() }
     }
 }
 
 impl ArcSlice {
     /// Return an owned [`ArcSlot`] for this index.
     pub(crate) fn get(&self, index: usize) -> ArcSlot {
-        self.inc_strong();
+        self.meta.inc_strong();
         let ptr: *mut ArcSliceInner = NonNull::as_ptr(self.ptr);
 
         // SAFETY: This cannot go through Deref::deref or RcBoxPtr::inner because
         // this is required to retain raw/mut provenance such that e.g. `get_mut` can
         // write through the pointer after the Rc is recovered through `from_raw`.
-        let slot = unsafe { (ptr::addr_of_mut!((*ptr).slice) as *mut usize).add(index) };
+        let slot = unsafe { (ptr::addr_of_mut!((*ptr).slice) as *mut ArcSlotInner).add(index) };
         debug_assert_eq!(
-            unsafe { *slot },
+            unsafe { (*slot).index },
             index,
             "the slot should point at our index"
         );
@@ -108,12 +118,78 @@ impl ArcSlice {
     }
 }
 
+impl ArcSliceInner {
+    /// The push function from the 1024cores intrusive MPSC queue algorithm.
+    pub(crate) fn push(&self, index: usize) {
+        self.slice[index]
+            .next
+            .store(self.meta.len + 1, atomic::Ordering::Relaxed);
+        let prev = self.meta.list_head.swap(index, atomic::Ordering::AcqRel);
+        self.slice[prev]
+            .next
+            .store(index, atomic::Ordering::Release);
+    }
+
+    // pub(crate) fn push_all(&mut self) {
+    //     if self.meta.len > 0 {
+    //         for i in 0..self.meta.len - 1 {
+    //             *self.slice[i].next.get_mut() = i + 1;
+    //         }
+    //         *self.meta.list_head.get_mut() = self.meta.len - 1;
+    //     }
+    // }
+
+    /// The pop function from the 1024cores intrusive MPSC queue algorithm
+    ///
+    /// Note that this is unsafe as it required mutual exclusion (only one
+    /// thread can call this) to be guaranteed elsewhere.
+    pub(crate) unsafe fn pop(&self) -> usize {
+        let mut tail = *self.meta.list_tail.get();
+        let mut next = self.slice[tail].next.load(atomic::Ordering::Acquire);
+
+        if tail == self.meta.len {
+            if next > self.meta.len {
+                return self.meta.len;
+            }
+
+            *self.meta.list_tail.get() = next;
+            tail = next;
+            next = self.slice[next].next.load(atomic::Ordering::Acquire);
+        }
+
+        if next <= self.meta.len {
+            *self.meta.list_tail.get() = next;
+            debug_assert!(tail != self.meta.len);
+            return tail;
+        }
+
+        if self.meta.list_head.load(atomic::Ordering::Acquire) != tail {
+            return self.meta.len + 1;
+            // panic!("inconsistent?");
+            // return Dequeue::Inconsistent;
+        }
+
+        self.push(self.meta.len);
+
+        next = self.slice[tail].next.load(atomic::Ordering::Acquire);
+
+        if next <= self.meta.len {
+            *self.meta.list_tail.get() = next;
+            return tail;
+        }
+
+        self.meta.len + 1
+        // panic!("inconsistent?");
+        // Dequeue::Inconsistent
+    }
+}
+
 impl ArcSlot {
     /// Traverses back the [`ArcSlice`] to find the [`ArcSliceInnerMeta`] pointer
     ///
     /// # Safety:
     /// `ptr` must be from an `ArcSlot` originally
-    unsafe fn meta_raw_ptr(ptr: *mut usize) -> *mut ArcSliceInnerMeta {
+    unsafe fn meta_raw_ptr(ptr: *mut ArcSlotInner) -> *mut ArcSliceInnerMeta {
         fn padding_needed_for(layout: &Layout, align: usize) -> usize {
             let len = layout.size();
 
@@ -140,11 +216,11 @@ impl ArcSlot {
             len_rounded_up.wrapping_sub(len)
         }
 
-        let index = *ptr;
+        let index = (*ptr).index;
         let slice_start = ptr.sub(index);
 
         let layout = Layout::new::<ArcSliceInnerMeta>();
-        let offset = layout.size() + padding_needed_for(&layout, align_of::<usize>());
+        let offset = layout.size() + padding_needed_for(&layout, align_of::<ArcSlotInner>());
 
         unsafe { slice_start.cast::<u8>().sub(offset) }.cast::<ArcSliceInnerMeta>()
     }
@@ -154,8 +230,21 @@ impl ArcSlot {
     /// # Safety:
     /// * `ptr` must be from an `ArcSlot` originally
     /// * The original `ArcSlot` must outlive `'a`
-    unsafe fn meta_raw<'a>(ptr: *const usize) -> &'a ArcSliceInnerMeta {
-        unsafe { &*Self::meta_raw_ptr(ptr as *mut usize) }
+    unsafe fn meta_raw<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInnerMeta {
+        unsafe { &*Self::meta_raw_ptr(ptr as *mut ArcSlotInner) }
+    }
+
+    /// Traverses back the [`ArcSlice`] to find the [`ArcSliceInner`] pointer
+    ///
+    /// # Safety:
+    /// * `ptr` must be from an `ArcSlot` originally
+    /// * The original `ArcSlot` must outlive `'a`
+    unsafe fn inner_raw<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInner {
+        let ptr = Self::meta_raw(ptr);
+        let len = *core::ptr::addr_of!(ptr.len);
+
+        let ptr = ptr as *const ArcSliceInnerMeta as *const ArcSlotInner;
+        &*(ptr::slice_from_raw_parts(ptr, len + 1) as *const ArcSliceInner)
     }
 
     fn meta(&self) -> &ArcSliceInnerMeta {
@@ -184,9 +273,9 @@ impl ArcSlot {
         // then call the stored waker to trigger a poll
         unsafe fn wake_by_ref(waker: *const ()) {
             let slot = waker.cast();
-            let meta = ArcSlot::meta_raw(slot);
-            meta.ready.push_sync(*slot);
-            meta.waker.wake();
+            let inner = ArcSlot::inner_raw(slot);
+            inner.push((*slot).index);
+            inner.meta.waker.wake();
         }
 
         // Decrement the reference count of the Arc on drop
@@ -299,40 +388,20 @@ impl Drop for ArcSlot {
     fn drop(&mut self) {
         let meta = self.meta();
         if meta.dec_strong() {
-            unsafe {
-                drop_inner(
-                    ArcSlot::meta_raw_ptr(self.ptr.as_ptr()),
-                    meta.ready.capacity(),
-                )
-            }
+            unsafe { drop_inner(ArcSlot::meta_raw_ptr(self.ptr.as_ptr()), meta.len) }
         }
     }
 }
 
 impl Drop for ArcSlice {
     fn drop(&mut self) {
-        if self.dec_strong() {
-            unsafe { drop_inner(self.ptr.as_ptr().cast(), self.ready.capacity()) }
+        if self.meta.dec_strong() {
+            unsafe { drop_inner(self.ptr.as_ptr().cast(), self.meta.len) }
         }
     }
 }
 
 impl ArcSlice {
-    /// Gets a mut reference to the metadata of this [`ArcSlice`]
-    ///
-    /// # Safety
-    /// This `ArcSlice` must have a strong count of 1
-    pub(crate) unsafe fn get_mut_unchecked(&mut self) -> &mut ArcSliceInnerMeta {
-        let meta = &mut self.ptr.as_mut().meta;
-        #[cfg(not(loom))]
-        debug_assert_eq!(
-            *meta.strong.get_mut(),
-            1,
-            "strong count should be 1 for mut access"
-        );
-        meta
-    }
-
     /// Allocates an `ArcInner<T>` with sufficient space for
     /// a possibly-unsized inner value where the value has the layout provided.
     pub(crate) fn new(cap: usize) -> Self {
@@ -342,14 +411,15 @@ impl ArcSlice {
 
         // safety: layout size is > 0 because it has at least 7 usizes
         // in the metadata alone
-        debug_assert!(core::mem::size_of::<ArcSliceInnerMeta>() > 0);
+        debug_assert!(arc_slice_layout.size() > 0);
         let ptr = unsafe { alloc::alloc::alloc(arc_slice_layout) };
         if ptr.is_null() {
             handle_alloc_error(arc_slice_layout)
         }
 
         // Initialize the ArcInner
-        let inner = ptr::slice_from_raw_parts_mut(ptr.cast::<usize>(), cap) as *mut ArcSliceInner;
+        let inner = ptr::slice_from_raw_parts_mut(ptr.cast::<ArcSlotInner>(), cap + 1)
+            as *mut ArcSliceInner;
         debug_assert_eq!(unsafe { Layout::for_value(&*inner) }, arc_slice_layout);
 
         // SAFETY:
@@ -357,12 +427,20 @@ impl ArcSlice {
         unsafe {
             let meta = ArcSliceInnerMeta {
                 strong: AtomicUsize::new(1),
-                ready: AtomicSparseSet::new(cap),
+                len: cap,
+                list_head: AtomicUsize::new(cap),
+                list_tail: UnsafeCell::new(cap),
                 waker: AtomicWaker::new(),
             };
             ptr::write(ptr::addr_of_mut!((*inner).meta), meta);
             for i in 0..cap {
-                ptr::write(ptr::addr_of_mut!((*inner).slice[i]), i);
+                ptr::write(
+                    ptr::addr_of_mut!((*inner).slice[i]),
+                    ArcSlotInner {
+                        index: i,
+                        next: AtomicUsize::new(cap + 1),
+                    },
+                );
             }
         }
 
@@ -373,10 +451,10 @@ impl ArcSlice {
     }
 
     fn layout(cap: usize) -> Layout {
-        let padded = Layout::new::<usize>().pad_to_align();
-        let alloc_size = padded.size().checked_mul(cap).unwrap();
+        let padded = Layout::new::<ArcSlotInner>().pad_to_align();
+        let alloc_size = padded.size().checked_mul(cap + 1).unwrap();
         let slice_layout =
-            Layout::from_size_align(alloc_size, Layout::new::<usize>().align()).unwrap();
+            Layout::from_size_align(alloc_size, Layout::new::<ArcSlotInner>().align()).unwrap();
 
         Layout::new::<ArcSliceInnerMeta>()
             .extend(slice_layout)

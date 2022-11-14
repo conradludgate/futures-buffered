@@ -97,7 +97,7 @@ use core::future::Future;
 use futures_core::Stream;
 
 mod arc_slice;
-mod atomic_sparse;
+// mod atomic_sparse;
 mod buffered;
 mod futures_ordered_bounded;
 mod futures_unordered_bounded;
