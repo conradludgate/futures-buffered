@@ -24,7 +24,7 @@ use futures_util::task::AtomicWaker;
 ///
 /// [`ArcSlice`] represents the shared state, as well as having a long tail of indices. The layout is as follows
 /// ```text
-/// [ strong_count | ready_set | waker | 0 | 1 | 2 | 3 | ... ]
+/// [ strong_count | waker | head | tail | len | slot 0 | slot 1 | slot 2 | slot 3 | ... ]
 /// ```
 ///
 /// [`ArcSlot`] represents our [`RawWaker`]. It points to one of the numbers in the list.
@@ -32,7 +32,9 @@ use futures_util::task::AtomicWaker;
 /// the shared data.
 ///
 /// For example, if we have an ArcSlot pointing at the number 2, we can count back to pointer 2 `usize`s + [`ArcSliceInnerMeta`] to find
-/// the start of the [`ArcSlice`], and then we can insert `2` into the `ready_set`, finally calling `waker.wake()`.
+/// the start of the [`ArcSlice`], and then we can insert `2` into the list of futures to poll, finally calling `waker.wake()`.
+///
+/// Each slot also forms part of a linked list.
 pub(crate) struct ArcSlice {
     ptr: NonNull<ArcSliceInner>,
     phantom: PhantomData<ArcSliceInner>,
@@ -43,16 +45,16 @@ pub(crate) struct ArcSlice {
 // inner types.
 #[repr(C)]
 pub(crate) struct ArcSliceInner {
-    pub(crate) meta: ArcSliceInnerMeta,
+    meta: ArcSliceInnerMeta,
     slice: [ArcSlotInner],
 }
 
 pub(crate) struct ArcSliceInnerMeta {
     strong: AtomicUsize,
-    len: usize,
+    waker: AtomicWaker,
     list_head: AtomicUsize,
     list_tail: UnsafeCell<usize>,
-    pub(crate) waker: AtomicWaker,
+    len: usize,
 }
 
 pub(crate) struct ArcSlot {
@@ -115,6 +117,11 @@ impl ArcSlice {
             ptr: unsafe { NonNull::new_unchecked(slot) },
             phantom: PhantomData,
         }
+    }
+
+    /// Register the waker
+    pub(crate) fn register(&self, waker: &Waker) {
+        self.meta.waker.register(waker)
     }
 }
 

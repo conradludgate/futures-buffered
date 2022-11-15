@@ -175,12 +175,13 @@ impl<F> FuturesUnorderedBounded<F> {
 
 impl<F: Future> FuturesUnorderedBounded<F> {
     pub(crate) fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
-        self.shared.meta.waker.register(cx.waker());
+        self.shared.register(cx.waker());
 
         const MAX: usize = 61;
         let mut count = 0;
         loop {
             count += 1;
+            // if we are in a pending only loop - let's break out.
             if count > MAX {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
