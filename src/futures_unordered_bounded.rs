@@ -173,8 +173,14 @@ impl<F> FuturesUnorderedBounded<F> {
     }
 }
 
-impl<F: Future> FuturesUnorderedBounded<F> {
-    pub(crate) fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
+type PollFn<F, O> = fn(Pin<&mut F>, cx: &mut Context<'_>) -> Poll<O>;
+
+impl<F> FuturesUnorderedBounded<F> {
+    pub(crate) fn poll_inner_no_remove<O>(
+        &mut self,
+        cx: &mut Context<'_>,
+        poll_fn: PollFn<F, O>,
+    ) -> Poll<Option<(usize, O)>> {
         self.shared.register(cx.waker());
 
         const MAX: usize = 61;
@@ -202,10 +208,9 @@ impl<F: Future> FuturesUnorderedBounded<F> {
                 let waker = self.shared.get(i).waker();
                 let mut cx = Context::from_waker(&waker);
 
-                let res = task.poll(&mut cx);
+                let res = poll_fn(task, &mut cx);
 
                 if let Poll::Ready(x) = res {
-                    self.tasks.remove(i);
                     return Poll::Ready(Some((i, x)));
                 }
             }
@@ -215,6 +220,18 @@ impl<F: Future> FuturesUnorderedBounded<F> {
             Poll::Ready(None)
         } else {
             Poll::Pending
+        }
+    }
+}
+
+impl<F: Future> FuturesUnorderedBounded<F> {
+    pub(crate) fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
+        match self.poll_inner_no_remove(cx, F::poll) {
+            Poll::Ready(Some((i, x))) => {
+                self.tasks.remove(i);
+                Poll::Ready(Some((i, x)))
+            }
+            p => p,
         }
     }
 }
