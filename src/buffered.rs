@@ -186,12 +186,11 @@ pin_project!(
     ///
     /// ### Speed
     ///
-    /// Running 512000 http requests (over an already establish HTTP2 connection) with 256 concurrent jobs
-    /// in a single threaded tokio runtime:
+    /// Running 65536 100us timers with 256 concurrent jobs in a single threaded tokio runtime:
     ///
     /// ```text
-    /// futures::stream::BufferUnordered    time:   [202.72 ms 203.34 ms 204.02 ms]
-    /// futures_buffered::BufferUnordered   time:   [226.67 ms 227.42 ms 228.26 ms]
+    /// futures::stream::BufferUnordered    time:   [420.33 ms 422.57 ms 424.83 ms]
+    /// futures_buffered::BufferUnordered   time:   [363.39 ms 365.59 ms 367.78 ms]
     /// ```
     ///
     /// ### Memory usage

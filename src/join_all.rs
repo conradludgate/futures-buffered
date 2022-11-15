@@ -41,11 +41,11 @@ impl<F: Future> Unpin for JoinAll<F> {}
 ///
 /// ### Speed
 ///
-/// Running 256 http requests (over an already establish HTTP2 connection) in a single threaded tokio runtime:
+/// Running 256 100us timers in a single threaded tokio runtime:
 ///
 /// ```text
-/// futures::future::join_all   time:   [729.30 µs 735.51 µs 742.39 µs]
-/// futures_buffered::join_all  time:   [617.72 µs 621.99 µs 626.72 µs]
+/// futures::future::join_all   time:   [3.3207 ms 3.3904 ms 3.4552 ms]
+/// futures_buffered::join_all  time:   [2.6058 ms 2.6616 ms 2.7189 ms]
 /// ```
 ///
 /// ### Memory usage
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn join_all() {
-        let x = futures::executor::block_on(crate::join_all((0..10).map(|_| ready(1))));
+        let x = futures::executor::block_on(crate::join_all((0..10).map(ready)));
 
         assert_eq!(x.len(), 10);
         assert_eq!(x.capacity(), 10);

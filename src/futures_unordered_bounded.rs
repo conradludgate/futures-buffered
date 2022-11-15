@@ -20,12 +20,11 @@ use futures_core::{FusedStream, Stream};
 ///
 /// ### Speed
 ///
-/// Running 512000 http requests (over an already establish HTTP2 connection) with 256 concurrent jobs
-/// in a single threaded tokio runtime:
+/// Running 65536 100us timers with 256 concurrent jobs in a single threaded tokio runtime:
 ///
 /// ```text
-/// FuturesUnordered         time:   [196.26 ms 197.02 ms 197.80 ms]
-/// FuturesUnorderedBounded  time:   [180.95 ms 181.86 ms 183.11 ms]
+/// FuturesUnordered         time:   [420.47 ms 422.21 ms 423.99 ms]
+/// FuturesUnorderedBounded  time:   [366.02 ms 367.54 ms 369.05 ms]
 /// ```
 ///
 /// ### Memory usage
@@ -50,7 +49,7 @@ use futures_core::{FusedStream, Stream};
 ///
 /// ### Conclusion
 ///
-/// As you can see, `FuturesUnorderedBounded` massively reduces you memory overhead while providing a small performance gain.
+/// As you can see, `FuturesUnorderedBounded` massively reduces you memory overhead while providing a significant performance gain.
 /// Perfect for if you want a fixed batch size
 ///
 /// # Example
@@ -178,7 +177,15 @@ impl<F: Future> FuturesUnorderedBounded<F> {
     pub(crate) fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
         self.shared.meta.waker.register(cx.waker());
 
+        const MAX: usize = 61;
+        let mut count = 0;
         loop {
+            count += 1;
+            if count > MAX {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
             let i = unsafe { self.shared.pop() };
             // empty
             if i == self.tasks.capacity() {
@@ -189,6 +196,7 @@ impl<F: Future> FuturesUnorderedBounded<F> {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
+
             if let Some(task) = self.tasks.get(i) {
                 let waker = self.shared.get(i).waker();
                 let mut cx = Context::from_waker(&waker);
@@ -316,7 +324,7 @@ mod tests {
         future::{poll_fn, ready},
         time::Duration,
     };
-    use futures::StreamExt;
+    use futures::{channel::oneshot, StreamExt};
     use futures_test::task::noop_context;
     use pin_project_lite::pin_project;
     use std::{thread, time::Instant};
@@ -496,5 +504,45 @@ mod tests {
 
         let count = c.into_inner();
         assert_eq!(count, 220);
+    }
+
+    #[cfg(not(miri))]
+    #[tokio::test]
+    async fn unordered_large() {
+        for i in 0..256 {
+            let mut queue: FuturesUnorderedBounded<_> = ((0..i).map(|_| async move {
+                tokio::time::sleep(Duration::from_nanos(1)).await;
+            }))
+            .collect();
+            for _ in 0..i {
+                queue.next().await.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn correct_fairer_order() {
+        const LEN: usize = 256;
+
+        let mut buffer = FuturesUnorderedBounded::new(LEN);
+        let mut txs = vec![];
+        for _ in 0..LEN {
+            let (tx, rx) = oneshot::channel();
+            buffer.push(rx);
+            txs.push(tx);
+        }
+
+        for _ in 0..(LEN / 61) + 1 {
+            assert!(buffer.poll_next_unpin(&mut noop_context()).is_pending());
+        }
+
+        for (i, tx) in txs.into_iter().enumerate() {
+            let _ = tx.send(i);
+        }
+
+        for i in 0..LEN {
+            let poll = buffer.poll_next_unpin(&mut noop_context());
+            assert_eq!(poll, Poll::Ready(Some(Ok(i))));
+        }
     }
 }

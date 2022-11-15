@@ -12,12 +12,11 @@
 //!
 //! ### Speed
 //!
-//! Running 512000 http requests (over an already establish HTTP2 connection) with 256 concurrent jobs
-//! in a single threaded tokio runtime:
+//! Running 65536 100us timers with 256 concurrent jobs in a single threaded tokio runtime:
 //!
 //! ```text
-//! FuturesUnordered         time:   [196.26 ms 197.02 ms 197.80 ms]
-//! FuturesUnorderedBounded  time:   [180.95 ms 181.86 ms 183.11 ms]
+//! FuturesUnordered         time:   [420.47 ms 422.21 ms 423.99 ms]
+//! FuturesUnorderedBounded  time:   [366.02 ms 367.54 ms 369.05 ms]
 //! ```
 //!
 //! ### Memory usage
@@ -42,7 +41,7 @@
 //!
 //! ### Conclusion
 //!
-//! As you can see, `FuturesUnorderedBounded` massively reduces you memory overhead while providing a small performance gain.
+//! As you can see, `FuturesUnorderedBounded` massively reduces you memory overhead while providing a significant performance gain.
 //! Perfect for if you want a fixed batch size
 //!
 //! # Example

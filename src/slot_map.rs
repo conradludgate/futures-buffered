@@ -21,16 +21,7 @@ enum Slot<F> {
 impl<F> SlotMap<F> {
     /// Constructs a new, empty [`SlotMap`] with the given capacity
     pub fn new(capacity: usize) -> Self {
-        // Create slots with a sentinel at index 0.
-        // We don't actually use the sentinel for anything currently, but
-        // HopSlotMap does, and if we want keys to remain valid through
-        // conversion we have to have one as well.
-        let mut slots = Vec::with_capacity(capacity);
-        let mut i = 0;
-        slots.resize_with(capacity, || {
-            i += 1;
-            Slot::NextFree(i)
-        });
+        let slots: Vec<_> = (1..=capacity).map(Slot::NextFree).collect();
 
         Self {
             slots: slots.into_boxed_slice().into(),

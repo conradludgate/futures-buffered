@@ -10,12 +10,11 @@ The is different to `FuturesUnordered` in that `FuturesUnorderedBounded` has a f
 
 ### Speed
 
-Running 512000 http requests (over an already establish HTTP2 connection) with 256 concurrent jobs
-in a single threaded tokio runtime:
+Running 65536 100us timers with 256 concurrent jobs in a single threaded tokio runtime:
 
 ```
-FuturesUnordered         time:   [204.44 ms 205.47 ms 206.61 ms]
-FuturesUnorderedBounded  time:   [191.92 ms 192.52 ms 193.15 ms]
+FuturesUnordered         time:   [420.47 ms 422.21 ms 423.99 ms]
+FuturesUnorderedBounded  time:   [366.02 ms 367.54 ms 369.05 ms]
 ```
 
 ### Memory usage
@@ -33,8 +32,8 @@ FuturesUnordered
     dealloc:  40960000 B
 
 FuturesUnorderedBounded
-    count:    4
-    alloc:    14400 B
+    count:    2
+    alloc:    8264 B
     dealloc:  0 B
 ```
 
