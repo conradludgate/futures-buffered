@@ -193,25 +193,22 @@ impl<F> FuturesUnorderedBounded<F> {
                 return Poll::Pending;
             }
 
-            let i = unsafe { self.shared.pop() };
-            // empty
-            if i == self.tasks.capacity() {
-                break;
-            }
-            // inconsistent
-            if i > self.tasks.capacity() {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
+            match unsafe { self.shared.pop() } {
+                crate::arc_slice::ReadySlot::None => break,
+                crate::arc_slice::ReadySlot::Inconsistent => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                crate::arc_slice::ReadySlot::Ready((i, waker)) => {
+                    if let Some(task) = self.tasks.get(i) {
+                        let mut cx = Context::from_waker(&waker);
 
-            if let Some(task) = self.tasks.get(i) {
-                let waker = self.shared.get(i).waker();
-                let mut cx = Context::from_waker(&waker);
+                        let res = poll_fn(task, &mut cx);
 
-                let res = poll_fn(task, &mut cx);
-
-                if let Poll::Ready(x) = res {
-                    return Poll::Ready(Some((i, x)));
+                        if let Poll::Ready(x) = res {
+                            return Poll::Ready(Some((i, x)));
+                        }
+                    }
                 }
             }
         }
