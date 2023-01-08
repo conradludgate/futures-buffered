@@ -52,6 +52,22 @@ fn batch(c: &mut Criterion) {
                 }
             })
         });
+        g.bench_with_input(BenchmarkId::new("futures-buffered2", i), i, |b, &batch| {
+            let mut queue = FuturesUnordered::new();
+            let total = batch*batch;
+            b.iter(|| {
+                for _ in 0..batch {
+                    queue.push(sleep())
+                }
+                for _ in batch..total {
+                    runtime.block_on(queue.next());
+                    queue.push(sleep())
+                }
+                for _ in 0..batch {
+                    runtime.block_on(queue.next());
+                }
+            })
+        });
     }
     g.finish();
 

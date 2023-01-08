@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use futures;
 use futures_buffered::BufferedStreamExt;
 use futures_util::StreamExt;
 use reqwest::{Client, Error};

@@ -96,9 +96,9 @@ use core::future::Future;
 use futures_core::Stream;
 
 mod arc_slice;
-// mod atomic_sparse;
 mod buffered;
 mod futures_ordered_bounded;
+mod futures_unordered;
 mod futures_unordered_bounded;
 mod join_all;
 mod merge;
@@ -109,6 +109,7 @@ mod try_join_all;
 pub use buffered::{BufferUnordered, BufferedOrdered, BufferedStreamExt};
 pub use futures_ordered_bounded::FuturesOrderedBounded;
 pub use futures_unordered_bounded::FuturesUnorderedBounded;
+pub use futures_unordered::FuturesUnordered;
 pub use join_all::{join_all, JoinAll};
 pub use merge::Merge;
 pub use try_buffered::{BufferedTryStreamExt, TryBufferUnordered, TryBufferedOrdered};

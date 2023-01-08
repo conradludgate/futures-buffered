@@ -111,6 +111,27 @@ fn futures_unordered_bounded() {
     for _ in 0..BATCH {
         queue.next().now_or_never().unwrap();
     }
+    drop(queue);
+
+    ALLOCATOR.report();
+}
+
+#[test]
+fn futures_unordered2() {
+    ALLOCATOR.reset();
+
+    let mut queue = futures_buffered::FuturesUnordered::new();
+    for i in 0..BATCH {
+        queue.push(ready(i))
+    }
+    for i in BATCH..TOTAL {
+        queue.next().now_or_never().unwrap();
+        queue.push(ready(i))
+    }
+    for _ in 0..BATCH {
+        queue.next().now_or_never().unwrap();
+    }
+    drop(queue);
 
     ALLOCATOR.report();
 }
