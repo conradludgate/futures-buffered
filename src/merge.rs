@@ -74,7 +74,8 @@ impl<S: Stream> Stream for Merge<S> {
             match self.streams.poll_inner_no_remove(cx, S::poll_next) {
                 // if we have a value from the stream, wake up that slot again
                 Poll::Ready(Some((i, Some(x)))) => {
-                    self.streams.shared.push(i);
+                    // safety: i is always within capacity
+                    unsafe { self.streams.shared.push(i); }
                     break Poll::Ready(Some(x));
                 }
                 // if a stream completed, remove it from the queue

@@ -1,14 +1,11 @@
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 use futures::{
     stream::{self, FuturesUnordered},
     StreamExt,
 };
 use futures_buffered::{BufferedStreamExt, FuturesUnorderedBounded};
-
-const BATCH: usize = 256;
-const TOTAL: usize = 65536;
 
 fn batch(c: &mut Criterion) {
     // setup a tokio runtime for our tests
@@ -21,79 +18,98 @@ fn batch(c: &mut Criterion) {
         tokio::time::sleep(Duration::from_micros(100)).await
     }
 
-    let mut queue = FuturesUnordered::new();
-    c.bench_function("FuturesUnordered", |b| {
-        b.iter(|| {
-            for _ in 0..BATCH {
-                queue.push(sleep())
-            }
-            for _ in BATCH..TOTAL {
-                runtime.block_on(queue.next());
-                queue.push(sleep())
-            }
-            for _ in 0..BATCH {
-                runtime.block_on(queue.next());
-            }
-        })
-    });
+    let mut g = c.benchmark_group("FuturesUnordered");
+    for i in [16, 64, 256].iter() {
+        g.bench_with_input(BenchmarkId::new("futures-rs", i), i, |b, &batch| {
+            let mut queue = FuturesUnordered::new();
+            let total = batch*batch;
+            b.iter(|| {
+                for _ in 0..batch {
+                    queue.push(sleep())
+                }
+                for _ in batch..total {
+                    runtime.block_on(queue.next());
+                    queue.push(sleep())
+                }
+                for _ in 0..batch {
+                    runtime.block_on(queue.next());
+                }
+            })
+        });
+        g.bench_with_input(BenchmarkId::new("futures-buffered", i), i, |b, &batch| {
+            let mut queue = FuturesUnorderedBounded::new(batch);
+            let total = batch*batch;
+            b.iter(|| {
+                for _ in 0..batch {
+                    queue.push(sleep())
+                }
+                for _ in batch..total {
+                    runtime.block_on(queue.next());
+                    queue.push(sleep())
+                }
+                for _ in 0..batch {
+                    runtime.block_on(queue.next());
+                }
+            })
+        });
+    }
+    g.finish();
 
-    let mut queue = FuturesUnorderedBounded::new(BATCH);
-    c.bench_function("FuturesUnorderedBounded", |b| {
-        b.iter(|| {
-            for _ in 0..BATCH {
-                queue.push(sleep());
-            }
-            for _ in BATCH..TOTAL {
-                runtime.block_on(queue.next());
-                queue.push(sleep());
-            }
-            for _ in 0..BATCH {
-                runtime.block_on(queue.next());
-            }
-        })
-    });
+    let mut g = c.benchmark_group("BufferUnordered");
+    for i in [16, 64, 256].iter() {
+        g.bench_with_input(BenchmarkId::new("futures-rs", i), i, |b, &batch| {
+            let total = batch*batch;
+            b.iter(|| {
+                let mut s = stream::iter((0..total).map(|_| sleep())).buffer_unordered(batch);
+                while runtime.block_on(s.next()).is_some() {}
+            })
+        });
+        g.bench_with_input(BenchmarkId::new("futures-buffered", i), i, |b, &batch| {
+            let total = batch*batch;
+            b.iter(|| {
+                let mut s = stream::iter((0..total).map(|_| sleep())).buffered_unordered(batch);
+                while runtime.block_on(s.next()).is_some() {}
+            })
+        });
+    }
+    g.finish();
 
-    c.bench_function("BufferUnordered", |b| {
-        b.iter(|| {
-            let mut s = stream::iter((0..TOTAL).map(|_| sleep())).buffer_unordered(BATCH);
-            while runtime.block_on(s.next()).is_some() {}
-        })
-    });
+    let mut g = c.benchmark_group("Buffered");
+    for i in [16, 64, 256].iter() {
+        g.bench_with_input(BenchmarkId::new("futures-rs", i), i, |b, &batch| {
+            let total = batch*batch;
+            b.iter(|| {
+                let mut s = stream::iter((0..total).map(|_| sleep())).buffered(batch);
+                while runtime.block_on(s.next()).is_some() {}
+            })
+        });
+        g.bench_with_input(BenchmarkId::new("futures-buffered", i), i, |b, &batch| {
+            let total = batch*batch;
+            b.iter(|| {
+                let mut s = stream::iter((0..total).map(|_| sleep())).buffered_ordered(batch);
+                while runtime.block_on(s.next()).is_some() {}
+            })
+        });
+    }
+    g.finish();
 
-    c.bench_function("BufferedUnordered", |b| {
-        b.iter(|| {
-            let mut s = stream::iter((0..TOTAL).map(|_| sleep())).buffered_unordered(BATCH);
-            while runtime.block_on(s.next()).is_some() {}
-        })
-    });
+    let mut g = c.benchmark_group("join_all");
+    for i in [16, 64, 256, 1024].iter() {
+        g.bench_with_input(BenchmarkId::new("futures-rs", i), i, |b, &batch| {
+            b.iter(|| {
+                let futs = (0..batch * 8).map(|_| sleep());
+                runtime.block_on(futures::future::join_all(futs));
+            })
+        });
+        g.bench_with_input(BenchmarkId::new("futures-buffered", i), i, |b, &batch| {
+            b.iter(|| {
+                let futs = (0..batch * 8).map(|_| sleep());
+                runtime.block_on(futures_buffered::join_all(futs));
+            })
+        });
+    }
+    g.finish();
 
-    c.bench_function("futures::join_all", |b| {
-        b.iter(|| {
-            let futs = (0..BATCH * 8).map(|_| sleep());
-            runtime.block_on(futures::future::join_all(futs));
-        })
-    });
-
-    c.bench_function("crate::join_all", |b| {
-        b.iter(|| {
-            let futs = (0..BATCH * 8).map(|_| sleep());
-            runtime.block_on(futures_buffered::join_all(futs));
-        })
-    });
-
-    c.bench_function("Buffered", |b| {
-        b.iter(|| {
-            let mut s = stream::iter((0..TOTAL).map(|_| sleep())).buffered(BATCH);
-            while runtime.block_on(s.next()).is_some() {}
-        })
-    });
-
-    c.bench_function("BufferedOrdered", |b| {
-        b.iter(|| {
-            let mut s = stream::iter((0..TOTAL).map(|_| sleep())).buffered_ordered(BATCH);
-            while runtime.block_on(s.next()).is_some() {}
-        })
-    });
 }
 
 criterion_group!(benches, batch);

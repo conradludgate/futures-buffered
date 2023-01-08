@@ -151,7 +151,8 @@ impl<F> FuturesUnorderedBounded<F> {
     #[inline]
     pub(crate) fn try_push_with<T>(&mut self, t: T, f: impl FnMut(T) -> F) -> Result<(), T> {
         let i = self.tasks.insert_with(t, f)?;
-        self.shared.push(i);
+        // safety: i is always within capacity
+        unsafe { self.shared.push(i); }
         Ok(())
     }
 
@@ -305,14 +306,9 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
         let shared = ArcSlice::new(cap);
 
         for i in 0..cap {
-            shared.push(i);
+            // safety: i is always within capacity
+            unsafe { shared.push(i); }
         }
-
-        // // we know that we haven't cloned this arc before, since it was created just above
-        // let meta = unsafe { shared.get_mut_unchecked() };
-
-        // // register the shared state on our tasks
-        // meta.push_all();
 
         // create the queue
         Self { tasks, shared }
