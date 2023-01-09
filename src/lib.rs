@@ -108,8 +108,8 @@ mod try_join_all;
 
 pub use buffered::{BufferUnordered, BufferedOrdered, BufferedStreamExt};
 pub use futures_ordered_bounded::FuturesOrderedBounded;
-pub use futures_unordered_bounded::FuturesUnorderedBounded;
 pub use futures_unordered::FuturesUnordered;
+pub use futures_unordered_bounded::FuturesUnorderedBounded;
 pub use join_all::{join_all, JoinAll};
 pub use merge::Merge;
 pub use try_buffered::{BufferedTryStreamExt, TryBufferUnordered, TryBufferedOrdered};

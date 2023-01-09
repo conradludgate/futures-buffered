@@ -26,9 +26,9 @@ use futures_core::{FusedStream, Stream};
 /// Running 65536 100us timers with 256 concurrent jobs in a single threaded tokio runtime:
 ///
 /// ```text
-/// futures::FuturesUnordered time:   [417.27 ms 418.83 ms 420.42 ms]
-/// crate::FuturesUnordered   time:   [419.04 ms 420.71 ms 422.41 ms]
-/// FuturesUnorderedBounded   time:   [365.36 ms 366.88 ms 368.43 ms]
+/// futures::FuturesUnordered time:   [412.52 ms 414.47 ms 416.41 ms]
+/// crate::FuturesUnordered   time:   [412.96 ms 414.69 ms 416.65 ms]
+/// FuturesUnorderedBounded   time:   [361.81 ms 362.96 ms 364.13 ms]
 /// ```
 ///
 /// ### Memory usage
@@ -53,7 +53,7 @@ use futures_core::{FusedStream, Stream};
 ///
 /// ### Conclusion
 ///
-/// As you can see, `FuturesUnordered` massively reduces you memory overhead while maintaining good performance.
+/// As you can see, our `FuturesUnordered` massively reduces you memory overhead while maintaining good performance.
 ///
 /// # Example
 ///
@@ -105,7 +105,8 @@ use futures_core::{FusedStream, Stream};
 pub struct FuturesUnordered<F> {
     pub(crate) queues: Vec<FuturesUnorderedBounded<F>>,
     len: usize,
-    min_free: usize,
+    min_poll: usize,
+    max_free: usize,
 }
 
 const MIN_CAPACITY: usize = 32;
@@ -128,7 +129,8 @@ impl<F> FuturesUnordered<F> {
         Self {
             queues: Vec::new(),
             len: 0,
-            min_free: 0,
+            min_poll: 0,
+            max_free: usize::MAX,
         }
     }
 
@@ -138,10 +140,15 @@ impl<F> FuturesUnordered<F> {
     /// In this state, [`FuturesUnordered::poll_next`](Stream::poll_next) will
     /// return [`Poll::Ready(None)`](Poll::Ready).
     pub fn with_capacity(n: usize) -> Self {
-        Self {
-            queues: alloc::vec![FuturesUnorderedBounded::new(n)],
-            len: 0,
-            min_free: 0,
+        if n > 0 {
+            Self {
+                queues: alloc::vec![FuturesUnorderedBounded::new(n)],
+                len: 0,
+                min_poll: 0,
+                max_free: 0,
+            }
+        } else {
+            Self::new()
         }
     }
 
@@ -151,38 +158,35 @@ impl<F> FuturesUnordered<F> {
     /// call [`poll`](core::future::Future::poll) on the submitted future. The caller must
     /// ensure that [`FuturesUnordered::poll_next`](Stream::poll_next) is called
     /// in order to receive wake-up notifications for the given future.
-    pub fn push(&mut self, fut: F) {
-        let queue = match self.queues.get_mut(self.min_free) {
-            Some(queue) => queue,
-            None => {
-                debug_assert_eq!(
-                    self.len(),
-                    self.capacity(),
-                    "min_free should be in bounds if not full"
-                );
+    pub fn push(&mut self, mut fut: F) {
+        loop {
+            let queue = match self.queues.get_mut(self.max_free) {
+                Some(queue) => queue,
+                None => {
+                    debug_assert_eq!(
+                        self.len(),
+                        self.capacity(),
+                        "max_free should be in bounds if not full: {self:?}"
+                    );
 
-                let cap = self
-                    .queues
-                    .last()
-                    .map_or(MIN_CAPACITY, |queue| queue.capacity() * 2);
-                let queue = FuturesUnorderedBounded::new(cap);
-                self.queues.push(queue);
-                self.queues.last_mut().unwrap()
-            }
-        };
-        queue.push(fut);
-        self.len += 1;
-
-        if queue.capacity() == queue.len() {
-            // we need to track forward to the next min_free queue
-            loop {
-                self.min_free += 1;
-                let Some(queue) = self.queues.get(self.min_free) else { break };
-                if queue.capacity() != queue.len() {
+                    self.max_free = self.queues.len();
+                    let cap = self
+                        .queues
+                        .last()
+                        .map_or(MIN_CAPACITY, |queue| queue.capacity() * 2);
+                    let mut queue = FuturesUnorderedBounded::new(cap);
+                    queue.push(fut);
+                    self.queues.push(queue);
                     break;
                 }
-            }
+            };
+            let Err(f) = queue.try_push(fut) else { break };
+            fut = f;
+            // this in fact was not the max_free queue
+            self.max_free = self.max_free.wrapping_sub(1);
         }
+        self.min_poll = usize::min(self.max_free, self.min_poll);
+        self.len += 1;
     }
 
     /// Returns `true` if the set contains no futures.
@@ -210,18 +214,27 @@ impl<F> FuturesUnordered<F> {
 impl<F: Future> Stream for FuturesUnordered<F> {
     type Item = F::Output;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.len == 0 {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let Self {
+            queues,
+            len,
+            min_poll,
+            max_free,
+        } = self.get_mut();
+        if *len == 0 {
             return Poll::Ready(None);
         }
-        // going in reverse, we are more likely to
-        // reach a hit with the larger bank of futures
-        for (i, queue) in self.queues.iter_mut().enumerate().rev() {
+        for (i, queue) in queues.iter_mut().enumerate().skip(*min_poll) {
             match queue.poll_inner(cx) {
                 Poll::Ready(Some((_, p))) => {
-                    self.len -= 1;
-                    self.min_free = usize::min(i, self.min_free);
+                    *len -= 1;
+                    *max_free = usize::max(i, *max_free);
                     return Poll::Ready(Some(p));
+                }
+                // move min_poll up if the current min_poll
+                // is empty
+                Poll::Ready(None) if i == *min_poll => {
+                    *min_poll += 1;
                 }
                 _ => continue,
             }
@@ -286,19 +299,22 @@ impl<F> FromIterator<F> for FuturesUnordered<F> {
     /// # Ok(()) }
     /// ```
     fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
-        let queue = FuturesUnorderedBounded::from_iter(iter);
-        let len = queue.len();
-        Self {
-            queues: alloc::vec![queue],
-            len,
-            min_free: 0,
+        let iter = iter.into_iter();
+        let mut this =
+            FuturesUnordered::with_capacity(usize::max(iter.size_hint().0, MIN_CAPACITY));
+        for fut in iter {
+            this.push(fut);
         }
+        this
     }
 }
 
-impl<Fut: Future> fmt::Debug for FuturesUnordered<Fut> {
+impl<Fut> fmt::Debug for FuturesUnordered<Fut> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FuturesUnordered {{ ... }}")
+        f.debug_struct("FuturesUnordered")
+            .field("queues", &self.queues)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
     }
 }
 
@@ -410,7 +426,7 @@ mod tests {
         let buffer = FuturesUnordered::from_iter((0..10).map(|_| ready(())));
 
         assert_eq!(buffer.len(), 10);
-        assert_eq!(buffer.capacity(), 10);
+        assert_eq!(buffer.capacity(), 32);
         assert_eq!(buffer.size_hint(), (10, Some(10)));
     }
 

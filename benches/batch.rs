@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use futures::{
     stream::{self, FuturesUnordered},
     StreamExt,
@@ -22,7 +22,7 @@ fn batch(c: &mut Criterion) {
     for i in [16, 64, 256].iter() {
         g.bench_with_input(BenchmarkId::new("futures-rs", i), i, |b, &batch| {
             let mut queue = FuturesUnordered::new();
-            let total = batch*batch;
+            let total = batch * batch;
             b.iter(|| {
                 for _ in 0..batch {
                     queue.push(sleep())
@@ -38,7 +38,7 @@ fn batch(c: &mut Criterion) {
         });
         g.bench_with_input(BenchmarkId::new("futures-buffered", i), i, |b, &batch| {
             let mut queue = FuturesUnorderedBounded::new(batch);
-            let total = batch*batch;
+            let total = batch * batch;
             b.iter(|| {
                 for _ in 0..batch {
                     queue.push(sleep())
@@ -54,7 +54,7 @@ fn batch(c: &mut Criterion) {
         });
         g.bench_with_input(BenchmarkId::new("futures-buffered2", i), i, |b, &batch| {
             let mut queue = FuturesUnordered::new();
-            let total = batch*batch;
+            let total = batch * batch;
             b.iter(|| {
                 for _ in 0..batch {
                     queue.push(sleep())
@@ -74,14 +74,14 @@ fn batch(c: &mut Criterion) {
     let mut g = c.benchmark_group("BufferUnordered");
     for i in [16, 64, 256].iter() {
         g.bench_with_input(BenchmarkId::new("futures-rs", i), i, |b, &batch| {
-            let total = batch*batch;
+            let total = batch * batch;
             b.iter(|| {
                 let mut s = stream::iter((0..total).map(|_| sleep())).buffer_unordered(batch);
                 while runtime.block_on(s.next()).is_some() {}
             })
         });
         g.bench_with_input(BenchmarkId::new("futures-buffered", i), i, |b, &batch| {
-            let total = batch*batch;
+            let total = batch * batch;
             b.iter(|| {
                 let mut s = stream::iter((0..total).map(|_| sleep())).buffered_unordered(batch);
                 while runtime.block_on(s.next()).is_some() {}
@@ -93,14 +93,14 @@ fn batch(c: &mut Criterion) {
     let mut g = c.benchmark_group("Buffered");
     for i in [16, 64, 256].iter() {
         g.bench_with_input(BenchmarkId::new("futures-rs", i), i, |b, &batch| {
-            let total = batch*batch;
+            let total = batch * batch;
             b.iter(|| {
                 let mut s = stream::iter((0..total).map(|_| sleep())).buffered(batch);
                 while runtime.block_on(s.next()).is_some() {}
             })
         });
         g.bench_with_input(BenchmarkId::new("futures-buffered", i), i, |b, &batch| {
-            let total = batch*batch;
+            let total = batch * batch;
             b.iter(|| {
                 let mut s = stream::iter((0..total).map(|_| sleep())).buffered_ordered(batch);
                 while runtime.block_on(s.next()).is_some() {}
@@ -125,7 +125,6 @@ fn batch(c: &mut Criterion) {
         });
     }
     g.finish();
-
 }
 
 criterion_group!(benches, batch);

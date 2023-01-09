@@ -152,7 +152,9 @@ impl<F> FuturesUnorderedBounded<F> {
     pub(crate) fn try_push_with<T>(&mut self, t: T, f: impl FnMut(T) -> F) -> Result<(), T> {
         let i = self.tasks.insert_with(t, f)?;
         // safety: i is always within capacity
-        unsafe { self.shared.push(i); }
+        unsafe {
+            self.shared.push(i);
+        }
         Ok(())
     }
 
@@ -182,6 +184,10 @@ impl<F> FuturesUnorderedBounded<F> {
         cx: &mut Context<'_>,
         poll_fn: PollFn<F, O>,
     ) -> Poll<Option<(usize, O)>> {
+        if self.is_empty() {
+            return Poll::Ready(None);
+        }
+
         self.shared.register(cx.waker());
 
         const MAX: usize = 61;
@@ -214,11 +220,7 @@ impl<F> FuturesUnorderedBounded<F> {
             }
         }
 
-        if self.is_empty() {
-            Poll::Ready(None)
-        } else {
-            Poll::Pending
-        }
+        Poll::Pending
     }
 }
 
@@ -307,7 +309,9 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
 
         for i in 0..cap {
             // safety: i is always within capacity
-            unsafe { shared.push(i); }
+            unsafe {
+                shared.push(i);
+            }
         }
 
         // create the queue
@@ -321,9 +325,11 @@ impl<Fut: Future> FusedStream for FuturesUnorderedBounded<Fut> {
     }
 }
 
-impl<Fut: Future> fmt::Debug for FuturesUnorderedBounded<Fut> {
+impl<Fut> fmt::Debug for FuturesUnorderedBounded<Fut> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FuturesUnorderedBounded {{ ... }}")
+        f.debug_struct("FuturesUnorderedBounded")
+            .field("len", &self.tasks.len())
+            .finish_non_exhaustive()
     }
 }
 

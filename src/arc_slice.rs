@@ -126,14 +126,16 @@ impl ArcSlice {
 
 impl ArcSliceInner {
     /// The push function from the 1024cores intrusive MPSC queue algorithm.
-    /// 
+    ///
     /// Safety: index must be within capacity
     pub(crate) unsafe fn push(&self, index: usize) {
-        self.slice.get_unchecked(index)
+        self.slice
+            .get_unchecked(index)
             .next
             .store(self.meta.len + 1, atomic::Ordering::Relaxed);
         let prev = self.meta.list_head.swap(index, atomic::Ordering::AcqRel);
-        self.slice.get_unchecked(prev)
+        self.slice
+            .get_unchecked(prev)
             .next
             .store(index, atomic::Ordering::Release);
     }
@@ -153,7 +155,11 @@ impl ArcSliceInner {
 
             *self.meta.list_tail.get() = next;
             tail = next;
-            next = self.slice.get_unchecked(next).next.load(atomic::Ordering::Acquire);
+            next = self
+                .slice
+                .get_unchecked(next)
+                .next
+                .load(atomic::Ordering::Acquire);
         }
 
         if next <= self.meta.len {
@@ -168,7 +174,11 @@ impl ArcSliceInner {
 
         self.push(self.meta.len);
 
-        next = self.slice.get_unchecked(tail).next.load(atomic::Ordering::Acquire);
+        next = self
+            .slice
+            .get_unchecked(tail)
+            .next
+            .load(atomic::Ordering::Acquire);
 
         if next <= self.meta.len {
             *self.meta.list_tail.get() = next;
