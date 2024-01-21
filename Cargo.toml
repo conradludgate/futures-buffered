@@ -26,7 +26,7 @@ hyper = { version = "0.14", features = ["client", "http2", "tcp"] }
 tokio = { version = "1", features = ["full", "macros"] }
 reqwest = "0.11"
 
-divan = "0.1.7"
+divan = "0.1.11"
 
 [[bench]]
 name = "batch"
