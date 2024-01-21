@@ -22,8 +22,8 @@ mod futures_unordered {
 
     const SIZES: [usize; 3] = [16, 64, 256];
 
-    #[divan::bench(consts = SIZES)]
-    fn futures<const N: usize>() {
+    #[divan::bench(args = SIZES)]
+    fn futures(n: usize) {
         // setup a tokio runtime for our tests
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -32,38 +32,38 @@ mod futures_unordered {
 
         let mut queue = FuturesUnordered::new();
 
-        let total = N * N;
-        for _ in 0..N {
+        let total = n * n;
+        for _ in 0..n {
             queue.push(sleep())
         }
-        for _ in N..total {
+        for _ in n..total {
             runtime.block_on(queue.next());
             queue.push(sleep())
         }
-        for _ in 0..N {
+        for _ in 0..n {
             runtime.block_on(queue.next());
         }
     }
 
-    #[divan::bench(consts = SIZES)]
-    fn futures_buffered<const N: usize>() {
+    #[divan::bench(args = SIZES)]
+    fn futures_buffered(n: usize) {
         // setup a tokio runtime for our tests
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        let mut queue = FuturesUnorderedBounded::new(N);
+        let mut queue = FuturesUnorderedBounded::new(n);
 
-        let total = N * N;
-        for _ in 0..N {
+        let total = n * n;
+        for _ in 0..n {
             queue.push(sleep())
         }
-        for _ in N..total {
+        for _ in n..total {
             runtime.block_on(queue.next());
             queue.push(sleep())
         }
-        for _ in 0..N {
+        for _ in 0..n {
             runtime.block_on(queue.next());
         }
     }
@@ -78,29 +78,29 @@ mod buffer_unordered {
 
     const SIZES: [usize; 3] = [16, 64, 256];
 
-    #[divan::bench(consts = SIZES)]
-    fn futures<const N: usize>() {
+    #[divan::bench(args = SIZES)]
+    fn futures(n: usize) {
         // setup a tokio runtime for our tests
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        let total = N * N;
-        let mut s = stream::iter((0..total).map(|_| sleep())).buffer_unordered(N);
+        let total = n * n;
+        let mut s = stream::iter((0..total).map(|_| sleep())).buffer_unordered(n);
         while runtime.block_on(s.next()).is_some() {}
     }
 
-    #[divan::bench(consts = SIZES)]
-    fn futures_buffered<const N: usize>() {
+    #[divan::bench(args = SIZES)]
+    fn futures_buffered(n: usize) {
         // setup a tokio runtime for our tests
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        let total = N * N;
-        let mut s = stream::iter((0..total).map(|_| sleep())).buffered_unordered(N);
+        let total = n * n;
+        let mut s = stream::iter((0..total).map(|_| sleep())).buffered_unordered(n);
         while runtime.block_on(s.next()).is_some() {}
     }
 }
@@ -114,29 +114,29 @@ mod buffer_ordered {
 
     const SIZES: [usize; 3] = [16, 64, 256];
 
-    #[divan::bench(consts = SIZES)]
-    fn futures<const N: usize>() {
+    #[divan::bench(args = SIZES)]
+    fn futures(n: usize) {
         // setup a tokio runtime for our tests
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        let total = N * N;
-        let mut s = stream::iter((0..total).map(|_| sleep())).buffered(N);
+        let total = n * n;
+        let mut s = stream::iter((0..total).map(|_| sleep())).buffered(n);
         while runtime.block_on(s.next()).is_some() {}
     }
 
-    #[divan::bench(consts = SIZES)]
-    fn futures_buffered<const N: usize>() {
+    #[divan::bench(args = SIZES)]
+    fn futures_buffered(n: usize) {
         // setup a tokio runtime for our tests
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        let total = N * N;
-        let mut s = stream::iter((0..total).map(|_| sleep())).buffered_ordered(N);
+        let total = n * n;
+        let mut s = stream::iter((0..total).map(|_| sleep())).buffered_ordered(n);
         while runtime.block_on(s.next()).is_some() {}
     }
 }
@@ -147,27 +147,27 @@ mod join {
 
     const SIZES: [usize; 4] = [16, 64, 256, 1024];
 
-    #[divan::bench(consts = SIZES)]
-    fn futures<const N: usize>() {
+    #[divan::bench(args = SIZES)]
+    fn futures(n: usize) {
         // setup a tokio runtime for our tests
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        let futs = (0..N * 8).map(|_| sleep());
+        let futs = (0..n * 8).map(|_| sleep());
         runtime.block_on(futures::future::join_all(futs));
     }
 
-    #[divan::bench(consts = SIZES)]
-    fn futures_buffered<const N: usize>() {
+    #[divan::bench(args = SIZES)]
+    fn futures_buffered(n: usize) {
         // setup a tokio runtime for our tests
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        let futs = (0..N * 8).map(|_| sleep());
+        let futs = (0..n * 8).map(|_| sleep());
         runtime.block_on(futures_buffered::join_all(futs));
     }
 }
