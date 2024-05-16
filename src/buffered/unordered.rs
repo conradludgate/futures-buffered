@@ -9,7 +9,7 @@ use pin_project_lite::pin_project;
 use crate::FuturesUnorderedBounded;
 
 pin_project!(
-    /// Stream for the [`buffered_unordered`](BufferedStreamExt::buffered_unordered)
+    /// Stream for the [`buffered_unordered`](crate::BufferedStreamExt::buffered_unordered)
     /// method.
     ///
     /// # Examples
