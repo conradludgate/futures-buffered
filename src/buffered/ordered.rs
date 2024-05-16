@@ -8,7 +8,7 @@ use futures_core::Stream;
 use pin_project_lite::pin_project;
 
 pin_project! {
-    /// Stream for the [`buffered_ordered`](BufferedStreamExt::buffered_ordered) method.
+    /// Stream for the [`buffered_ordered`](crate::BufferedStreamExt::buffered_ordered) method.
     #[must_use = "streams do nothing unless polled"]
     pub struct BufferedOrdered<St>
     where
