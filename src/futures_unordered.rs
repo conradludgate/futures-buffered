@@ -214,7 +214,9 @@ impl<F: Future> Stream for FuturesUnordered<F> {
             groups,
             poll_next,
         } = &mut *self;
-        assert!(!groups.is_empty());
+        if groups.is_empty() {
+            return Poll::Ready(None);
+        }
 
         for _ in 0..groups.len() {
             if *poll_next >= groups.len() {
