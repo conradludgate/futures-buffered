@@ -46,9 +46,13 @@
 //!
 //! # Example
 //! ```
+//! use futures::future::Future;
 //! use futures::stream::StreamExt;
 //! use futures_buffered::FuturesUnorderedBounded;
-//! use hyper::{client::conn::{handshake, ResponseFuture, SendRequest}, Body, Request };
+//! use hyper::client::conn::http1::{handshake, SendRequest};
+//! use hyper::body::Incoming;
+//! use hyper::{Request, Response};
+//! use hyper_util::rt::TokioIo;
 //! use tokio::net::TcpStream;
 //!
 //! # #[tokio::main]
@@ -57,15 +61,15 @@
 //! let stream = TcpStream::connect("example.com:80").await?;
 //!
 //! // perform the http handshakes
-//! let (mut rs, conn) = handshake(stream).await?;
+//! let (mut rs, conn) = handshake(TokioIo::new(stream)).await?;
 //! tokio::spawn(conn);
 //!
 //! /// make http request to example.com and read the response
-//! fn make_req(rs: &mut SendRequest<Body>) -> ResponseFuture {
+//! fn make_req(rs: &mut SendRequest<String>) -> impl Future<Output = hyper::Result<Response<Incoming>>> {
 //!     let req = Request::builder()
 //!         .header("Host", "example.com")
 //!         .method("GET")
-//!         .body(Body::from(""))
+//!         .body(String::new())
 //!         .unwrap();
 //!     rs.send_request(req)
 //! }
@@ -97,6 +101,7 @@ use futures_core::Stream;
 
 mod arc_slice;
 mod buffered;
+mod futures_ordered;
 mod futures_ordered_bounded;
 mod futures_unordered;
 mod futures_unordered_bounded;
@@ -107,6 +112,7 @@ mod try_buffered;
 mod try_join_all;
 
 pub use buffered::{BufferUnordered, BufferedOrdered, BufferedStreamExt};
+pub use futures_ordered::FuturesOrdered;
 pub use futures_ordered_bounded::FuturesOrderedBounded;
 pub use futures_unordered::FuturesUnordered;
 pub use futures_unordered_bounded::FuturesUnorderedBounded;

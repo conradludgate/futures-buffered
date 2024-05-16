@@ -19,8 +19,8 @@ pin_project! {
     #[derive(Debug)]
     pub(crate) struct OrderWrapper<T> {
         #[pin]
-        pub(crate) data: T, // A future or a future's output
-        pub(crate) index: usize,
+        pub data: T, // A future or a future's output
+        pub index: usize,
     }
 }
 
@@ -92,9 +92,6 @@ where
 /// Note that you can create a ready-made `FuturesOrderedBounded` via the
 /// [`collect`](Iterator::collect) method, or you can start with an empty queue
 /// with the `FuturesOrderedBounded::new` constructor.
-///
-/// This type is only available when the `std` or `alloc` feature of this
-/// library is activated, and it is activated by default.
 #[must_use = "streams do nothing unless polled"]
 pub struct FuturesOrderedBounded<T: Future> {
     pub(crate) in_progress_queue: FuturesUnorderedBounded<OrderWrapper<T>>,
