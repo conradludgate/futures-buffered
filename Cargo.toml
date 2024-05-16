@@ -1,6 +1,6 @@
 [package]
 name = "futures-buffered"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 description = "future concurrency primitives with emphasis on performance and low memory usage"
 license = "MIT"
