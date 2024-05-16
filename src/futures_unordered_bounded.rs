@@ -344,7 +344,7 @@ mod tests {
     use futures::{channel::oneshot, StreamExt};
     use futures_test::task::noop_context;
     use pin_project_lite::pin_project;
-    use std::{thread, time::Instant};
+    use std::time::Instant;
 
     pin_project!(
         struct PollCounter<'c, F> {
@@ -362,21 +362,17 @@ mod tests {
         }
     }
 
-    struct Sleep {
-        until: Instant,
+    struct Yield {
+        done: bool,
     }
-    impl Unpin for Sleep {}
-    impl Future for Sleep {
+    impl Unpin for Yield {}
+    impl Future for Yield {
         type Output = ();
 
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let until = self.until;
-            if until > Instant::now() {
-                let waker = cx.waker().clone();
-                thread::spawn(move || {
-                    thread::sleep(until.duration_since(Instant::now()));
-                    waker.wake()
-                });
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if !self.as_mut().done {
+                cx.waker().wake_by_ref();
+                self.as_mut().done = true;
                 Poll::Pending
             } else {
                 Poll::Ready(())
@@ -384,12 +380,10 @@ mod tests {
         }
     }
 
-    fn sleep(count: &Cell<usize>, dur: Duration) -> PollCounter<'_, Sleep> {
+    fn yield_now(count: &Cell<usize>) -> PollCounter<'_, Yield> {
         PollCounter {
             count,
-            inner: Sleep {
-                until: Instant::now() + dur,
-            },
+            inner: Yield { done: false },
         }
     }
 
@@ -398,7 +392,7 @@ mod tests {
         let c = Cell::new(0);
 
         let mut buffer = FuturesUnorderedBounded::new(10);
-        buffer.push(sleep(&c, Duration::from_secs(1)));
+        buffer.push(yield_now(&c));
         futures::executor::block_on(buffer.next());
 
         drop(buffer);
@@ -467,21 +461,21 @@ mod tests {
 
     #[test]
     fn multi() {
-        fn wait(count: &Cell<usize>, i: usize) -> PollCounter<'_, Sleep> {
-            sleep(count, Duration::from_secs(1) / (i as u32 % 10 + 5))
+        fn wait(count: &Cell<usize>) -> PollCounter<'_, Yield> {
+            yield_now(count)
         }
 
         let c = Cell::new(0);
 
         let mut buffer = FuturesUnorderedBounded::new(10);
         // build up
-        for i in 0..10 {
-            buffer.push(wait(&c, i));
+        for _ in 0..10 {
+            buffer.push(wait(&c));
         }
         // poll and insert
-        for i in 0..100 {
+        for _ in 0..100 {
             assert!(futures::executor::block_on(buffer.next()).is_some());
-            buffer.push(wait(&c, i));
+            buffer.push(wait(&c));
         }
         // drain down
         for _ in 0..10 {
@@ -501,15 +495,15 @@ mod tests {
         let mut buffer = FuturesUnorderedBounded::new(10);
         // build up
         for _ in 0..9 {
-            buffer.push(sleep(&c, Duration::from_millis(10)));
+            buffer.push(yield_now(&c));
         }
         // spawn a slow future among a bunch of fast ones.
         // the test is to make sure this doesn't block the rest getting completed
-        buffer.push(sleep(&c, Duration::from_secs(2)));
+        buffer.push(yield_now(&c));
         // poll and insert
         for _ in 0..100 {
             assert!(futures::executor::block_on(buffer.next()).is_some());
-            buffer.push(sleep(&c, Duration::from_millis(10)));
+            buffer.push(yield_now(&c));
         }
         // drain down
         for _ in 0..10 {

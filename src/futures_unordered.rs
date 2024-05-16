@@ -103,10 +103,9 @@ use futures_core::{FusedStream, Stream};
 /// # Ok(()) }
 /// ```
 pub struct FuturesUnordered<F> {
-    pub(crate) queues: Vec<FuturesUnorderedBounded<F>>,
-    len: usize,
-    min_poll: usize,
-    max_free: usize,
+    rem: usize,
+    groups: Vec<FuturesUnorderedBounded<F>>,
+    poll_next: usize,
 }
 
 const MIN_CAPACITY: usize = 32;
@@ -127,10 +126,9 @@ impl<F> FuturesUnordered<F> {
     /// return [`Poll::Ready(None)`](Poll::Ready).
     pub const fn new() -> Self {
         Self {
-            queues: Vec::new(),
-            len: 0,
-            min_poll: 0,
-            max_free: usize::MAX,
+            rem: 0,
+            groups: Vec::new(),
+            poll_next: 0,
         }
     }
 
@@ -142,10 +140,9 @@ impl<F> FuturesUnordered<F> {
     pub fn with_capacity(n: usize) -> Self {
         if n > 0 {
             Self {
-                queues: alloc::vec![FuturesUnorderedBounded::new(n)],
-                len: 0,
-                min_poll: 0,
-                max_free: 0,
+                rem: 0,
+                groups: Vec::from_iter([FuturesUnorderedBounded::new(n)]),
+                poll_next: 0,
             }
         } else {
             Self::new()
@@ -158,55 +155,47 @@ impl<F> FuturesUnordered<F> {
     /// call [`poll`](core::future::Future::poll) on the submitted future. The caller must
     /// ensure that [`FuturesUnordered::poll_next`](Stream::poll_next) is called
     /// in order to receive wake-up notifications for the given future.
-    pub fn push(&mut self, mut fut: F) {
-        loop {
-            let queue = match self.queues.get_mut(self.max_free) {
-                Some(queue) => queue,
-                None => {
-                    debug_assert_eq!(
-                        self.len(),
-                        self.capacity(),
-                        "max_free should be in bounds if not full: {self:?}"
-                    );
+    pub fn push(&mut self, fut: F) {
+        self.rem += 1;
 
-                    self.max_free = self.queues.len();
-                    let cap = self
-                        .queues
-                        .last()
-                        .map_or(MIN_CAPACITY, |queue| queue.capacity() * 2);
-                    let mut queue = FuturesUnorderedBounded::new(cap);
-                    queue.push(fut);
-                    self.queues.push(queue);
-                    break;
-                }
-            };
-            let Err(f) = queue.try_push(fut) else { break };
-            fut = f;
-            // this in fact was not the max_free queue
-            self.max_free = self.max_free.wrapping_sub(1);
+        let last = match self.groups.last_mut() {
+            Some(last) => last,
+            None => {
+                self.groups.push(FuturesUnorderedBounded::new(MIN_CAPACITY));
+                self.groups.last_mut().unwrap()
+            }
+        };
+        match last.try_push(fut) {
+            Ok(()) => {}
+            Err(future) => {
+                let mut next = FuturesUnorderedBounded::new(last.capacity() * 2);
+                next.push(future);
+                self.groups.push(next);
+            }
         }
-        self.min_poll = usize::min(self.max_free, self.min_poll);
-        self.len += 1;
     }
 
     /// Returns `true` if the set contains no futures.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.rem == 0
     }
 
     /// Returns the number of futures contained in the set.
     ///
     /// This represents the total number of in-flight futures.
     pub fn len(&self) -> usize {
-        self.len
+        self.rem
     }
 
     /// Returns the number of futures that can be contained in the set.
     pub fn capacity(&self) -> usize {
-        match self.queues.as_slice() {
+        match self.groups.as_slice() {
             [] => 0,
             [only] => only.capacity(),
-            [first, .., last] => 2 * last.capacity() - first.capacity(),
+            [.., last] => {
+                let spare_cap = last.capacity() - last.len();
+                self.rem + spare_cap
+            }
         }
     }
 }
@@ -214,36 +203,53 @@ impl<F> FuturesUnordered<F> {
 impl<F: Future> Stream for FuturesUnordered<F> {
     type Item = F::Output;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let Self {
-            queues,
-            len,
-            min_poll,
-            max_free,
-        } = self.get_mut();
-        if *len == 0 {
-            return Poll::Ready(None);
-        }
-        for (i, queue) in queues.iter_mut().enumerate().skip(*min_poll) {
-            match queue.poll_inner(cx) {
-                Poll::Ready(Some((_, p))) => {
-                    *len -= 1;
-                    *max_free = usize::max(i, *max_free);
-                    return Poll::Ready(Some(p));
+            rem,
+            groups,
+            poll_next,
+        } = &mut *self;
+        assert!(!groups.is_empty());
+
+        for _ in 0..groups.len() {
+            if *poll_next >= groups.len() {
+                *poll_next = 0;
+            }
+
+            let poll = Pin::new(&mut groups[*poll_next]).poll_next(cx);
+            match poll {
+                Poll::Ready(Some(x)) => {
+                    *rem -= 1;
+                    return Poll::Ready(Some(x));
                 }
-                // move min_poll up if the current min_poll
-                // is empty
-                Poll::Ready(None) if i == *min_poll => {
-                    *min_poll += 1;
+                Poll::Ready(None) => {
+                    let group = groups.remove(*poll_next);
+                    debug_assert!(group.is_empty());
+
+                    if groups.is_empty() {
+                        // group should contain at least 1 set
+                        groups.push(group);
+                        debug_assert_eq!(*rem, 0);
+                        return Poll::Ready(None);
+                    }
+
+                    // we do not want to drop the last set as it contains
+                    // the largest allocation that we want to keep a hold of
+                    if *poll_next == groups.len() {
+                        groups.push(group);
+                        *poll_next = 0;
+                    }
                 }
-                _ => continue,
+                Poll::Pending => {
+                    *poll_next += 1;
+                }
             }
         }
         Poll::Pending
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.len, Some(self.len))
+        (self.rem, Some(self.rem))
     }
 }
 impl<F: Future> FusedStream for FuturesUnordered<F> {
@@ -312,8 +318,8 @@ impl<F> FromIterator<F> for FuturesUnordered<F> {
 impl<Fut> fmt::Debug for FuturesUnordered<Fut> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FuturesUnordered")
-            .field("queues", &self.queues)
-            .field("len", &self.len)
+            .field("queues", &self.groups)
+            .field("len", &self.rem)
             .finish_non_exhaustive()
     }
 }
@@ -364,12 +370,28 @@ mod tests {
         }
     }
 
-    fn sleep(count: &Cell<usize>, dur: Duration) -> PollCounter<'_, Sleep> {
+    struct Yield {
+        done: bool,
+    }
+    impl Unpin for Yield {}
+    impl Future for Yield {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if !self.as_mut().done {
+                cx.waker().wake_by_ref();
+                self.as_mut().done = true;
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }
+    }
+
+    fn yield_now(count: &Cell<usize>) -> PollCounter<'_, Yield> {
         PollCounter {
             count,
-            inner: Sleep {
-                until: Instant::now() + dur,
-            },
+            inner: Yield { done: false },
         }
     }
 
@@ -378,7 +400,7 @@ mod tests {
         let c = Cell::new(0);
 
         let mut buffer = FuturesUnordered::new();
-        buffer.push(sleep(&c, Duration::from_secs(1)));
+        buffer.push(yield_now(&c));
         futures::executor::block_on(buffer.next());
 
         drop(buffer);
@@ -416,7 +438,7 @@ mod tests {
 
         assert_eq!(buffer.len(), 0);
         assert!(buffer.is_empty());
-        assert_eq!(buffer.capacity(), 3);
+        assert_eq!(buffer.capacity(), 2);
         assert_eq!(buffer.size_hint(), (0, Some(0)));
         assert!(buffer.is_terminated());
     }
@@ -432,21 +454,21 @@ mod tests {
 
     #[test]
     fn multi() {
-        fn wait(count: &Cell<usize>, i: usize) -> PollCounter<'_, Sleep> {
-            sleep(count, Duration::from_secs(1) / (i as u32 % 10 + 5))
+        fn wait(count: &Cell<usize>) -> PollCounter<'_, Yield> {
+            yield_now(count)
         }
 
         let c = Cell::new(0);
 
         let mut buffer = FuturesUnordered::with_capacity(1);
         // build up
-        for i in 0..10 {
-            buffer.push(wait(&c, i));
+        for _ in 0..10 {
+            buffer.push(wait(&c));
         }
         // poll and insert
-        for i in 0..100 {
+        for _ in 0..100 {
             assert!(futures::executor::block_on(buffer.next()).is_some());
-            buffer.push(wait(&c, i));
+            buffer.push(wait(&c));
         }
         // drain down
         for _ in 0..10 {
@@ -466,15 +488,15 @@ mod tests {
         let mut buffer = FuturesUnordered::with_capacity(1);
         // build up
         for _ in 0..9 {
-            buffer.push(sleep(&c, Duration::from_millis(10)));
+            buffer.push(yield_now(&c));
         }
         // spawn a slow future among a bunch of fast ones.
         // the test is to make sure this doesn't block the rest getting completed
-        buffer.push(sleep(&c, Duration::from_secs(2)));
+        buffer.push(yield_now(&c));
         // poll and insert
         for _ in 0..100 {
             assert!(futures::executor::block_on(buffer.next()).is_some());
-            buffer.push(sleep(&c, Duration::from_millis(10)));
+            buffer.push(yield_now(&c));
         }
         // drain down
         for _ in 0..10 {

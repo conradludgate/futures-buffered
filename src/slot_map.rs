@@ -57,7 +57,9 @@ impl<F> SlotMap<F> {
     /// Removes a key from the slot map
     pub fn remove(&mut self, key: usize) {
         let free_head = self.free_head;
-        let Some(mut slot) = self.get_slot(key) else { return };
+        let Some(mut slot) = self.get_slot(key) else {
+            return;
+        };
         if let Slot::NextFree(_) = &*slot {
             return; // don't update if this slot is already free
         }
