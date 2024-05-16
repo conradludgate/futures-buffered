@@ -1,3 +1,4 @@
+#![cfg(not(miri))]
 use std::time::Instant;
 
 use futures_buffered::BufferedStreamExt;

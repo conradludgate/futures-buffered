@@ -86,7 +86,7 @@ pub trait BufferedStreamExt: Stream {
     /// closure for each element on the stream concurrently as elements become
     /// available.
     ///
-    /// This is similar to [`StreamExt::for_each`], but the futures
+    /// This is similar to [`StreamExt::for_each`](futures_util::StreamExt::for_each), but the futures
     /// produced by the closure are run concurrently (but not in parallel--
     /// this combinator does not introduce any threads).
     ///

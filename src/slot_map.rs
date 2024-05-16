@@ -1,6 +1,6 @@
 //! A SlotMap impl that uses a pre-allocated buffer to allow for pinned access.
 //!
-//! Implementation inspired by https://github.com/orlp/slotmap
+//! Implementation inspired by <https://github.com/orlp/slotmap>
 
 use alloc::{boxed::Box, vec::Vec};
 use core::{hint::unreachable_unchecked, pin::Pin};

@@ -66,7 +66,8 @@ use futures_core::{FusedStream, Stream};
 /// use hyper_util::rt::TokioIo;
 /// use tokio::net::TcpStream;
 ///
-/// # #[tokio::main]
+/// # #[cfg(miri)] fn main() {}
+/// # #[cfg(not(miri))] #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // create a tcp connection
 /// let stream = TcpStream::connect("example.com:80").await?;
@@ -274,7 +275,8 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
     /// use hyper_util::rt::TokioIo;
     /// use tokio::net::TcpStream;
     ///
-    /// # #[tokio::main]
+    /// # #[cfg(miri)] fn main() {}
+    /// # #[cfg(not(miri))] #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // create a tcp connection
     /// let stream = TcpStream::connect("example.com:80").await?;
