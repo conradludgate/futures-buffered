@@ -7,6 +7,9 @@ use futures_core::Stream;
 
 use crate::FuturesUnorderedBounded;
 
+#[deprecated = "use `MergeBounded` instead"]
+pub type Merge<S> = MergeBounded<S>;
+
 /// A combined stream that releases values in any order that they come
 ///
 /// # Example
@@ -31,11 +34,11 @@ use crate::FuturesUnorderedBounded;
 ///     assert_eq!(counter, 2+3+5+7);
 /// })
 /// ```
-pub struct Merge<S> {
+pub struct MergeBounded<S> {
     pub(crate) streams: FuturesUnorderedBounded<S>,
 }
 
-impl<S> Merge<S> {
+impl<S> MergeBounded<S> {
     /// Push a stream into the set.
     ///
     /// This method adds the given stream to the set. This method will not
@@ -66,7 +69,7 @@ impl<S> Merge<S> {
     }
 }
 
-impl<S: Stream> Stream for Merge<S> {
+impl<S: Stream> Stream for MergeBounded<S> {
     type Item = S::Item;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -91,7 +94,7 @@ impl<S: Stream> Stream for Merge<S> {
     }
 }
 
-impl<S: Stream> FromIterator<S> for Merge<S> {
+impl<S: Stream> FromIterator<S> for MergeBounded<S> {
     fn from_iter<T>(iter: T) -> Self
     where
         T: IntoIterator<Item = S>,
@@ -123,7 +126,7 @@ mod tests {
             let b = stream::repeat(3).take(3);
             let c = stream::repeat(5).take(5);
             let d = stream::repeat(7).take(7);
-            let mut s: Merge<_> = [a, b, c, d].into_iter().collect();
+            let mut s: MergeBounded<_> = [a, b, c, d].into_iter().collect();
 
             let mut counter = 0;
             while let Some(n) = s.next().await {
@@ -218,7 +221,8 @@ mod tests {
 
                 let (count, ()) = futures::future::join(
                     async {
-                        let s: Merge<_> = [receive1, receive2, receive3].into_iter().collect();
+                        let s: MergeBounded<_> =
+                            [receive1, receive2, receive3].into_iter().collect();
                         s.fold(0, |a, b| async move { a + b }).await
                     },
                     async {

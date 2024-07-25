@@ -6,7 +6,7 @@ use core::{
 use futures_core::Stream;
 use futures_util::{stream::StreamFuture, StreamExt};
 
-use crate::{FuturesUnordered};
+use crate::FuturesUnordered;
 
 /// A combined stream that releases values in any order that they come.
 ///
@@ -43,7 +43,9 @@ pub struct MergeUnbounded<S> {
 
 impl<S> Default for MergeUnbounded<S> {
     fn default() -> Self {
-        Self { streams: Default::default() }
+        Self {
+            streams: Default::default(),
+        }
     }
 }
 
