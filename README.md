@@ -31,15 +31,15 @@ Running 512000 `Ready<i32>` futures with 256 concurrent jobs.
 - dealloc: the number of cumulative bytes deallocated
 
 ```
-FuturesUnordered
-    count:    1024002
-    alloc:    40960144 B
-    dealloc:  40960000 B
+futures::FuturesUnordered
+    count:    1,024,004
+    alloc:    40.96 MB
+    dealloc:  40.96 MB
 
 FuturesUnorderedBounded
-    count:    2
-    alloc:    8264 B
-    dealloc:  0 B
+    count:    4
+    alloc:    8.28 KB
+    dealloc:  8.28 KB
 ```
 
 ### Conclusion
