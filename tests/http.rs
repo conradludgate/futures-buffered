@@ -1,8 +1,8 @@
 #![cfg(not(miri))]
 use std::time::Instant;
 
+use futures::StreamExt;
 use futures_buffered::BufferedStreamExt;
-use futures_util::StreamExt;
 use reqwest::{Client, Error};
 
 static URLS: &[&str] = &[

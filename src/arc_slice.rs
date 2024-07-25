@@ -7,7 +7,7 @@ use core::{
     sync::atomic::{self, AtomicUsize},
     task::Waker,
 };
-use futures_util::task::AtomicWaker;
+use diatomic_waker::primitives::DiatomicWaker;
 
 /// [`ArcSlice`] is a fun optimisation. For `FuturesUnorderedBounded`, we have `n` slots for futures,
 /// and we create a separate context when polling each individual future to avoid having n^2 polling.
@@ -50,7 +50,7 @@ pub(crate) struct ArcSliceInner {
 
 pub(crate) struct ArcSliceInnerMeta {
     strong: AtomicUsize,
-    waker: AtomicWaker,
+    waker: DiatomicWaker,
     list_head: AtomicUsize,
     list_tail: UnsafeCell<usize>,
     len: usize,
@@ -91,8 +91,12 @@ impl Deref for ArcSlice {
 
 impl ArcSlice {
     /// Register the waker
-    pub(crate) fn register(&self, waker: &Waker) {
-        self.meta.waker.register(waker)
+    pub(crate) fn register(&mut self, waker: &Waker) {
+        // Safety:
+        // Diatomic waker requires we do not concurrently run
+        // "register", "unregister", and "wait_until".
+        // we only call register with mut access, thus we are safe.
+        unsafe { self.meta.waker.register(waker) }
     }
 
     fn get(&self, index: usize) -> Waker {
@@ -289,7 +293,7 @@ mod slot {
             let slot = waker.cast();
             let inner = inner_ref(slot);
             inner.push((*slot).index);
-            inner.meta.waker.wake();
+            inner.meta.waker.notify();
         }
 
         // Decrement the reference count of the Arc on drop
@@ -433,7 +437,7 @@ impl ArcSlice {
                 len: cap,
                 list_head: AtomicUsize::new(cap),
                 list_tail: UnsafeCell::new(cap),
-                waker: AtomicWaker::new(),
+                waker: DiatomicWaker::new(),
             };
             ptr::write(ptr::addr_of_mut!((*inner).meta), meta);
             for i in 0..cap {
