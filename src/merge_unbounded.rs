@@ -1,12 +1,12 @@
+use alloc::vec::Vec;
 use core::{
     pin::Pin,
     task::{Context, Poll},
 };
 
 use futures_core::Stream;
-use futures_util::{stream::StreamFuture, StreamExt};
 
-use crate::FuturesUnordered;
+use crate::{futures_unordered::MIN_CAPACITY, FuturesUnorderedBounded, MergeBounded};
 
 /// A combined stream that releases values in any order that they come.
 ///
@@ -36,26 +36,27 @@ use crate::FuturesUnordered;
 ///     assert_eq!(counter, 2+3+4);
 /// })
 /// ```
-#[derive(Debug)]
 pub struct MergeUnbounded<S> {
-    pub(crate) streams: FuturesUnordered<StreamFuture<S>>,
+    pub(crate) groups: Vec<MergeBounded<S>>,
+    poll_next: usize,
 }
 
 impl<S> Default for MergeUnbounded<S> {
     fn default() -> Self {
-        Self {
-            streams: Default::default(),
-        }
+        Self::new()
     }
 }
 
-impl<S: Stream + Unpin> MergeUnbounded<S> {
+impl<S> MergeUnbounded<S> {
     /// Create a new, empty [`MergeUnbounded`].
     ///
     /// Calling [`poll_next`](futures_core::Stream::poll_next) will return `Poll::Ready(None)`
     /// until a stream is added with [`Self::push`].
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            groups: Vec::new(),
+            poll_next: 0,
+        }
     }
 
     /// Push a stream into the set.
@@ -66,7 +67,25 @@ impl<S: Stream + Unpin> MergeUnbounded<S> {
     /// in order to receive wake-up notifications for the given stream.
     #[track_caller]
     pub fn push(&mut self, stream: S) {
-        self.streams.push(stream.into_future())
+        let last = match self.groups.last_mut() {
+            Some(last) => last,
+            None => {
+                self.groups.push(MergeBounded {
+                    streams: FuturesUnorderedBounded::new(MIN_CAPACITY),
+                });
+                self.groups.last_mut().unwrap()
+            }
+        };
+        match last.try_push(stream) {
+            Ok(()) => {}
+            Err(stream) => {
+                let mut next = MergeBounded {
+                    streams: FuturesUnorderedBounded::new(last.streams.capacity() * 2),
+                };
+                next.push(stream);
+                self.groups.push(next);
+            }
+        }
     }
 }
 
@@ -74,21 +93,48 @@ impl<S: Stream + Unpin> Stream for MergeUnbounded<S> {
     type Item = S::Item;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match Pin::new(&mut self.streams).poll_next(cx) {
-                // if we have a value from the stream, yield the value and requeue the stream
-                Poll::Ready(Some((Some(item), stream))) => {
-                    self.push(stream);
-                    break Poll::Ready(Some(item));
+        let Self {
+            // rem,
+            groups,
+            poll_next,
+        } = &mut *self;
+        if groups.is_empty() {
+            return Poll::Ready(None);
+        }
+
+        for _ in 0..groups.len() {
+            if *poll_next >= groups.len() {
+                *poll_next = 0;
+            }
+
+            let poll = Pin::new(&mut groups[*poll_next]).poll_next(cx);
+            match poll {
+                Poll::Ready(Some(x)) => {
+                    return Poll::Ready(Some(x));
                 }
-                // if a stream completed, drop it
-                Poll::Ready(Some((None, _stream))) => {
-                    continue;
+                Poll::Ready(None) => {
+                    let group = groups.remove(*poll_next);
+                    debug_assert!(group.streams.is_empty());
+
+                    if groups.is_empty() {
+                        // group should contain at least 1 set
+                        groups.push(group);
+                        return Poll::Ready(None);
+                    }
+
+                    // we do not want to drop the last set as it contains
+                    // the largest allocation that we want to keep a hold of
+                    if *poll_next == groups.len() {
+                        groups.push(group);
+                        *poll_next = 0;
+                    }
                 }
-                Poll::Pending => break Poll::Pending,
-                Poll::Ready(None) => break Poll::Ready(None),
+                Poll::Pending => {
+                    *poll_next += 1;
+                }
             }
         }
+        Poll::Pending
     }
 }
 
@@ -97,9 +143,14 @@ impl<S: Stream + Unpin> FromIterator<S> for MergeUnbounded<S> {
     where
         T: IntoIterator<Item = S>,
     {
-        Self {
-            streams: iter.into_iter().map(StreamExt::into_future).collect(),
+        let iter = iter.into_iter();
+        // let mut this =
+        //     Self::with_capacity(usize::max(iter.size_hint().0, MIN_CAPACITY));
+        let mut this = Self::new();
+        for stream in iter {
+            this.push(stream);
         }
+        this
     }
 }
 
@@ -115,6 +166,7 @@ mod tests {
     use futures::executor::LocalPool;
     use futures::stream;
     use futures::task::LocalSpawnExt;
+    use futures::StreamExt;
 
     #[test]
     fn merge_tuple_4() {

@@ -113,7 +113,7 @@ pub struct FuturesUnordered<F> {
     poll_next: usize,
 }
 
-const MIN_CAPACITY: usize = 32;
+pub(crate) const MIN_CAPACITY: usize = 32;
 
 impl<F> Unpin for FuturesUnordered<F> {}
 
