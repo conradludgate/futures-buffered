@@ -1,10 +1,14 @@
 # futures-buffered
 
-This project provides a single future structure: `FuturesUnorderedBounded`.
+This project provides several future structures, all based around the `FuturesUnorderedBounded` primtive.
 
 Much like [`futures::FuturesUnordered`](https://docs.rs/futures/0.3.25/futures/stream/struct.FuturesUnordered.html), this is a thread-safe, `Pin` friendly, lifetime friendly, concurrent processing stream.
 
-The is different to `FuturesUnordered` in that `FuturesUnorderedBounded` has a fixed capacity for processing count. This means it's less flexible, but produces better memory efficiency.
+This primtive is different to `FuturesUnordered` in that `FuturesUnorderedBounded` has a fixed capacity for processing count. This means it's less flexible, but produces better memory efficiency.
+
+However, we also provide a `FuturesUnordered` which allocates larger `FuturesUnorderedBounded`
+automatically to mitigate these inflexibilities. This is based on a triangular-array concept
+to amortise the cost of allocating (much like with a Vec) without violating `Pin` constraints.
 
 ## Benchmarks
 
@@ -13,8 +17,9 @@ The is different to `FuturesUnordered` in that `FuturesUnorderedBounded` has a f
 Running 65536 100us timers with 256 concurrent jobs in a single threaded tokio runtime:
 
 ```
-FuturesUnordered         time:   [420.47 ms 422.21 ms 423.99 ms]
-FuturesUnorderedBounded  time:   [366.02 ms 367.54 ms 369.05 ms]
+FuturesUnorderedBounded    [339.9 ms  364.7 ms  380.6 ms]
+futures::FuturesUnordered  [377.4 ms  391.4 ms  406.3 ms]
+                           [min         mean         max]
 ```
 
 ### Memory usage
@@ -80,7 +85,7 @@ for _ in 0..128 {
 ```
 
 ```rust
-use futures::future::join_all;
+use futures_buffered::join_all;
 
 async fn foo(i: u32) -> u32 { i }
 
