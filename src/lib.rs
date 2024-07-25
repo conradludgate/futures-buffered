@@ -108,6 +108,7 @@ mod futures_unordered;
 mod futures_unordered_bounded;
 mod join_all;
 mod merge;
+mod merge_unbounded;
 mod slot_map;
 mod try_buffered;
 mod try_join_all;
@@ -119,6 +120,7 @@ pub use futures_unordered::FuturesUnordered;
 pub use futures_unordered_bounded::FuturesUnorderedBounded;
 pub use join_all::{join_all, JoinAll};
 pub use merge::Merge;
+pub use merge_unbounded::MergeUnbounded;
 pub use try_buffered::{BufferedTryStreamExt, TryBufferUnordered, TryBufferedOrdered};
 pub use try_join_all::{try_join_all, TryJoinAll};
 
