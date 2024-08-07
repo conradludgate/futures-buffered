@@ -4,7 +4,7 @@ use core::{
     marker::PhantomData,
     ops::Deref,
     ptr::{self, drop_in_place, NonNull},
-    sync::atomic::{self, AtomicUsize},
+    sync::atomic::{self, AtomicBool, AtomicUsize, Ordering},
     task::Waker,
 };
 use diatomic_waker::primitives::DiatomicWaker;
@@ -62,6 +62,7 @@ pub(crate) struct ArcSliceInnerMeta {
 #[repr(C)]
 pub(crate) struct ArcSlotInner {
     index: usize,
+    wake_lock: AtomicBool,
     next: AtomicUsize,
 }
 
@@ -136,12 +137,12 @@ impl ArcSliceInner {
         self.slice
             .get_unchecked(index)
             .next
-            .store(self.meta.len + 1, atomic::Ordering::Relaxed);
-        let prev = self.meta.list_head.swap(index, atomic::Ordering::AcqRel);
+            .store(self.meta.len + 1, Ordering::Relaxed);
+        let prev = self.meta.list_head.swap(index, Ordering::AcqRel);
         self.slice
             .get_unchecked(prev)
             .next
-            .store(index, atomic::Ordering::Release);
+            .store(index, Ordering::Release);
     }
 
     /// The pop function from the 1024cores intrusive MPSC queue algorithm
@@ -150,7 +151,7 @@ impl ArcSliceInner {
     /// thread can call this) to be guaranteed elsewhere.
     unsafe fn pop(&self) -> ReadySlot<usize> {
         let mut tail = *self.meta.list_tail.get();
-        let mut next = self.slice[tail].next.load(atomic::Ordering::Acquire);
+        let mut next = self.slice[tail].next.load(Ordering::Acquire);
 
         if tail == self.meta.len {
             if next > self.meta.len {
@@ -159,11 +160,7 @@ impl ArcSliceInner {
 
             *self.meta.list_tail.get() = next;
             tail = next;
-            next = self
-                .slice
-                .get_unchecked(next)
-                .next
-                .load(atomic::Ordering::Acquire);
+            next = self.slice.get_unchecked(next).next.load(Ordering::Acquire);
         }
 
         if next <= self.meta.len {
@@ -172,17 +169,13 @@ impl ArcSliceInner {
             return ReadySlot::Ready(tail);
         }
 
-        if self.meta.list_head.load(atomic::Ordering::Acquire) != tail {
+        if self.meta.list_head.load(Ordering::Acquire) != tail {
             return ReadySlot::Inconsistent;
         }
 
         self.push(self.meta.len);
 
-        next = self
-            .slice
-            .get_unchecked(tail)
-            .next
-            .load(atomic::Ordering::Acquire);
+        next = self.slice.get_unchecked(tail).next.load(Ordering::Acquire);
 
         if next <= self.meta.len {
             *self.meta.list_tail.get() = next;
@@ -324,9 +317,7 @@ impl ArcSliceInnerMeta {
         // another must already provide any required synchronization.
         //
         // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
-        let old_size = self
-            .strong
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let old_size = self.strong.fetch_add(1, Ordering::Relaxed);
 
         // However we need to guard against massive refcounts in case someone is `mem::forget`ing
         // Arcs. If we don't do this the count can overflow and users will use-after free. This
@@ -346,9 +337,7 @@ impl ArcSliceInnerMeta {
         // Because `fetch_sub` is already atomic, we do not need to synchronize
         // with other threads unless we are going to delete the object. This
         // same logic applies to the below `fetch_sub` to the `weak` count.
-        let old_size = self
-            .strong
-            .fetch_sub(1, core::sync::atomic::Ordering::Release);
+        let old_size = self.strong.fetch_sub(1, Ordering::Release);
         if old_size != 1 {
             return false;
         }
@@ -381,7 +370,7 @@ impl ArcSliceInnerMeta {
         //
         // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
         // [2]: (https://github.com/rust-lang/rust/pull/41714)
-        atomic::fence(atomic::Ordering::Acquire);
+        atomic::fence(Ordering::Acquire);
         true
     }
 }
@@ -440,11 +429,12 @@ impl ArcSlice {
                 waker: DiatomicWaker::new(),
             };
             ptr::write(ptr::addr_of_mut!((*inner).meta), meta);
-            for i in 0..cap {
+            for i in 0..=cap {
                 ptr::write(
                     ptr::addr_of_mut!((*inner).slice[i]),
                     ArcSlotInner {
                         index: i,
+                        wake_lock: AtomicBool::new(false),
                         next: AtomicUsize::new(cap + 1),
                     },
                 );
