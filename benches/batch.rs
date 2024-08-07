@@ -15,8 +15,8 @@ async fn sleep() {
 
 #[divan::bench_group]
 mod futures_unordered {
-    use futures_buffered::FuturesUnorderedBounded;
     use futures::{stream::FuturesUnordered, StreamExt};
+    use futures_buffered::FuturesUnorderedBounded;
 
     use crate::sleep;
 
@@ -71,8 +71,8 @@ mod futures_unordered {
 
 #[divan::bench_group]
 mod buffer_unordered {
-    use futures_buffered::BufferedStreamExt;
     use futures::{stream, StreamExt};
+    use futures_buffered::BufferedStreamExt;
 
     use crate::sleep;
 
@@ -107,8 +107,8 @@ mod buffer_unordered {
 
 #[divan::bench_group]
 mod buffer_ordered {
-    use futures_buffered::BufferedStreamExt;
     use futures::{stream, StreamExt};
+    use futures_buffered::BufferedStreamExt;
 
     use crate::sleep;
 

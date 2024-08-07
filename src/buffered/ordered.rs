@@ -63,19 +63,18 @@ where
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match &self.stream {
-            Some(s) => {
-                let queue_len = self.in_progress_queue.len();
-                let (lower, upper) = s.size_hint();
-                let lower = lower.saturating_add(queue_len);
-                let upper = match upper {
-                    Some(x) => x.checked_add(queue_len),
-                    None => None,
-                };
-                (lower, upper)
-            }
-            _ => (0, Some(0)),
-        }
+        let queue_len = self.in_progress_queue.len();
+        let (lower, upper) = self
+            .stream
+            .as_ref()
+            .map(|s| s.size_hint())
+            .unwrap_or((0, Some(0)));
+        let lower = lower.saturating_add(queue_len);
+        let upper = match upper {
+            Some(x) => x.checked_add(queue_len),
+            None => None,
+        };
+        (lower, upper)
     }
 }
 
