@@ -4,7 +4,7 @@ use core::{
     marker::PhantomData,
     ops::Deref,
     ptr::{self, drop_in_place, NonNull},
-    sync::atomic::{self, AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{self, AtomicBool, AtomicPtr, AtomicUsize, Ordering},
     task::Waker,
 };
 use diatomic_waker::primitives::DiatomicWaker;
@@ -51,8 +51,9 @@ pub(crate) struct ArcSliceInner {
 pub(crate) struct ArcSliceInnerMeta {
     strong: AtomicUsize,
     waker: DiatomicWaker,
-    list_head: AtomicUsize,
-    list_tail: UnsafeCell<usize>,
+    list_head: AtomicPtr<ArcSlotInner>,
+    list_tail: UnsafeCell<*const ArcSlotInner>,
+    stub: *const ArcSlotInner,
     len: usize,
 }
 
@@ -64,7 +65,7 @@ pub(crate) struct ArcSlotInner {
     index: usize,
     wake_lock: AtomicBool,
     // woken: AtomicBool,
-    next: AtomicUsize,
+    next: AtomicPtr<ArcSlotInner>,
 }
 
 const fn __assert_send_sync<T: Send + Sync>() {}
@@ -136,13 +137,16 @@ impl ArcSliceInner {
     ///
     /// Safety: index must be within capacity
     pub(crate) unsafe fn push(&self, index: usize) {
-        let node = self.slice.get_unchecked(index);
-        node.next.store(usize::MAX, Ordering::Relaxed);
+        self.push_node(&self.slice[index] as *const _)
+    }
 
-        let prev = self.meta.list_head.swap(index, Ordering::AcqRel);
+    /// The push function from the 1024cores intrusive MPSC queue algorithm.
+    /// https://www.1024cores.net/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue
+    unsafe fn push_node(&self, node: *const ArcSlotInner) {
+        (*node).next.store(ptr::null_mut(), Ordering::Relaxed);
 
-        let prev_node = self.slice.get_unchecked(prev);
-        prev_node.next.store(index, Ordering::Release);
+        let prev = self.meta.list_head.swap(node as *mut _, Ordering::AcqRel);
+        (*prev).next.store(node as *mut _, Ordering::Release);
     }
 
     /// The pop function from the 1024cores intrusive MPSC queue algorithm
@@ -152,39 +156,39 @@ impl ArcSliceInner {
     /// thread can call this) to be guaranteed elsewhere.
     unsafe fn pop(&self) -> ReadySlot<usize> {
         let mut tail = *self.meta.list_tail.get();
-        let mut next = self.slice[tail].next.load(Ordering::Acquire);
+        let mut next = (*tail).next.load(Ordering::Acquire);
 
-        if tail == self.meta.len {
-            if next == usize::MAX {
+        if tail == self.meta.stub {
+            if next.is_null() {
                 return ReadySlot::None;
             }
 
             *self.meta.list_tail.get() = next;
             tail = next;
-            next = self.slice.get_unchecked(next).next.load(Ordering::Acquire);
+            next = (*next).next.load(Ordering::Acquire);
         }
 
-        if next != usize::MAX {
+        if !next.is_null() {
             *self.meta.list_tail.get() = next;
-            debug_assert!(tail != self.meta.len);
+            debug_assert!(tail != self.meta.stub);
 
-            self.slice[tail].wake_lock.store(false, Ordering::SeqCst);
-            return ReadySlot::Ready(tail);
+            (*tail).wake_lock.store(false, Ordering::SeqCst);
+            return ReadySlot::Ready((*tail).index);
         }
 
-        if self.meta.list_head.load(Ordering::Acquire) != tail {
+        if self.meta.list_head.load(Ordering::Acquire) as *const _ != tail {
             return ReadySlot::Inconsistent;
         }
 
-        self.push(self.meta.len);
+        self.push_node(self.meta.stub);
 
-        next = self.slice.get_unchecked(tail).next.load(Ordering::Acquire);
+        next = (*tail).next.load(Ordering::Acquire);
 
-        if next != usize::MAX {
+        if !next.is_null() {
             *self.meta.list_tail.get() = next;
 
-            self.slice[tail].wake_lock.store(false, Ordering::SeqCst);
-            return ReadySlot::Ready(tail);
+            (*tail).wake_lock.store(false, Ordering::SeqCst);
+            return ReadySlot::Ready((*tail).index);
         }
 
         ReadySlot::Inconsistent
@@ -296,9 +300,8 @@ mod slot {
             let prev = node.wake_lock.swap(true, Ordering::SeqCst);
 
             if !prev {
-                let index = node.index;
                 let inner = inner_ref(slot);
-                inner.push(index);
+                inner.push_node(slot);
                 inner.meta.waker.notify();
             }
         }
@@ -435,11 +438,13 @@ impl ArcSlice {
         // SAFETY:
         // The inner pointer is allocated and aligned, they just need to be initialised
         unsafe {
+            let stub = ptr::addr_of_mut!((*inner).slice[cap]);
             let meta = ArcSliceInnerMeta {
                 strong: AtomicUsize::new(1),
                 len: cap,
-                list_head: AtomicUsize::new(cap),
-                list_tail: UnsafeCell::new(cap),
+                list_head: AtomicPtr::new(stub),
+                list_tail: UnsafeCell::new(stub),
+                stub,
                 waker: DiatomicWaker::new(),
             };
             ptr::write(ptr::addr_of_mut!((*inner).meta), meta);
@@ -450,7 +455,7 @@ impl ArcSlice {
                         index: i,
                         wake_lock: AtomicBool::new(false),
                         // woken: AtomicBool::new(false),
-                        next: AtomicUsize::new(usize::MAX),
+                        next: AtomicPtr::new(ptr::null_mut()),
                     },
                 );
             }
