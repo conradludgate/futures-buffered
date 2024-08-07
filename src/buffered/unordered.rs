@@ -138,6 +138,8 @@ mod tests {
     use super::*;
     use futures::{channel::oneshot, stream, StreamExt};
     use futures_test::task::noop_context;
+    use rand::{thread_rng, Rng};
+    use tokio::task::JoinSet;
 
     #[test]
     fn buffered_unordered() {
@@ -169,5 +171,40 @@ mod tests {
 
         // completes properly
         assert_eq!(buffered.poll_next_unpin(&mut cx), Poll::Ready(None));
+    }
+
+    // #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
+    async fn high_concurrency() {
+        let now = tokio::time::Instant::now();
+        let dur = std::time::Duration::from_millis(40);
+        let n = 1024 * 4;
+        let c = 32;
+
+        let estimated = dur * 21 * n / c / 2;
+        dbg!(estimated);
+
+        let mut js = JoinSet::new();
+
+        for _ in 0..32 {
+            js.spawn(async move {
+                let x = futures::stream::repeat_with(|| {
+                    let n = thread_rng().gen_range(1..=20);
+                    let fut = async move {
+                        for _ in 0..n {
+                            tokio::time::sleep(dur).await;
+                        }
+                    };
+                    tokio::time::timeout(dur * (n + 2), fut)
+                });
+                let x = x.take(n as usize).buffered_unordered(c as usize);
+                x.for_each(|res| async { res.unwrap() }).await;
+            });
+        }
+
+        while js.join_next().await.is_some() {}
+
+        let elapsed = now.elapsed();
+        dbg!(elapsed);
     }
 }
