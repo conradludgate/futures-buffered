@@ -206,7 +206,7 @@ impl<F> FuturesUnorderedBounded<F> {
             }
 
             match unsafe { self.shared.pop() } {
-                crate::arc_slice::ReadySlot::None => break,
+                crate::arc_slice::ReadySlot::None => return Poll::Pending,
                 crate::arc_slice::ReadySlot::Inconsistent => {
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
@@ -224,8 +224,6 @@ impl<F> FuturesUnorderedBounded<F> {
                 }
             }
         }
-
-        Poll::Pending
     }
 }
 
