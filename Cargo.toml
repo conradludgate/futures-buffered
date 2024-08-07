@@ -1,6 +1,6 @@
 [package]
 name = "futures-buffered"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 description = "future concurrency primitives with emphasis on performance and low memory usage"
 license = "MIT"
@@ -16,7 +16,7 @@ bench = false
 [dependencies]
 futures-core = "0.3.21"
 pin-project-lite = "0.2"
-diatomic-waker = "0.1.0"
+diatomic-waker = "0.2.0"
 
 [dev-dependencies]
 futures = "0.3.21"
