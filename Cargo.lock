@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "futures-buffered"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "diatomic-waker",
  "divan",
