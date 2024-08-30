@@ -90,11 +90,7 @@ impl<S> MergeUnbounded<S> {
 
     /// Returns `true` if there are no streams in the set.
     pub fn is_empty(&self) -> bool {
-        if self.groups.is_empty() {
-            true
-        } else {
-            self.groups.iter().all(|g| g.streams.is_empty())
-        }
+        self.groups.iter().all(|g| g.streams.is_empty())
     }
 
     /// Returns the number of streams currently in the set.
