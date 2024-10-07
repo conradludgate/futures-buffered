@@ -1,10 +1,13 @@
 use alloc::alloc::{dealloc, handle_alloc_error, Layout};
+use cordyceps::{
+    mpsc_queue::{Links, TryDequeueError},
+    Linked, MpscQueue,
+};
 use core::{
-    cell::UnsafeCell,
     marker::PhantomData,
-    ops::Deref,
+    mem::ManuallyDrop,
     ptr::{self, drop_in_place, NonNull},
-    sync::atomic::{self, AtomicBool, AtomicPtr, AtomicUsize, Ordering},
+    sync::atomic::{self, AtomicBool, AtomicUsize, Ordering},
     task::Waker,
 };
 use diatomic_waker::primitives::DiatomicWaker;
@@ -51,10 +54,8 @@ pub(crate) struct ArcSliceInner {
 pub(crate) struct ArcSliceInnerMeta {
     strong: AtomicUsize,
     waker: DiatomicWaker,
-    list_head: AtomicPtr<ArcSlotInner>,
-    list_tail: UnsafeCell<*const ArcSlotInner>,
-    stub: *const ArcSlotInner,
     len: usize,
+    queue: MpscQueue<ArcSlotInner>,
 }
 
 // This is repr(C) to future-proof against possible field-reordering, which
@@ -64,8 +65,23 @@ pub(crate) struct ArcSliceInnerMeta {
 pub(crate) struct ArcSlotInner {
     index: usize,
     wake_lock: AtomicBool,
-    // woken: AtomicBool,
-    next: AtomicPtr<ArcSlotInner>,
+    links: Links<Self>,
+}
+
+unsafe impl Linked<Links<Self>> for ArcSlotInner {
+    type Handle = NonNull<Self>;
+
+    fn into_ptr(r: Self::Handle) -> NonNull<Self> {
+        r
+    }
+
+    unsafe fn from_ptr(ptr: NonNull<Self>) -> Self::Handle {
+        ptr
+    }
+
+    unsafe fn links(ptr: NonNull<Self>) -> NonNull<Links<Self>> {
+        NonNull::new_unchecked(ptr::addr_of_mut!((*ptr.as_ptr()).links))
+    }
 }
 
 const fn __assert_send_sync<T: Send + Sync>() {}
@@ -79,37 +95,36 @@ const _: () = {
     unsafe impl Sync for ArcSlice {}
 };
 
-impl Deref for ArcSlice {
-    type Target = ArcSliceInner;
-
-    fn deref(&self) -> &Self::Target {
-        // This unsafety is ok because while this arc is alive we're guaranteed
-        // that the inner pointer is valid. Furthermore, we know that the
-        // `ArcInner` structure itself is `Sync` because the inner data is
-        // `Sync` as well, so we're ok loaning out an immutable pointer to these
-        // contents.
-        unsafe { self.ptr.as_ref() }
-    }
-}
-
 impl ArcSlice {
+    /// The push function from the 1024cores intrusive MPSC queue algorithm.
+    /// https://www.1024cores.net/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue
+    ///
+    /// Safety: index must be within capacity
+    pub(crate) unsafe fn push(&self, index: usize) {
+        let queue = &*ptr::addr_of!((*self.ptr.as_ptr()).meta.queue);
+        let slice = ptr::addr_of!((*self.ptr.as_ptr()).slice) as *const ArcSlotInner;
+        let slot = slice.add(index);
+
+        queue.enqueue(NonNull::new_unchecked(slot.cast_mut()));
+    }
+
     /// Register the waker
     pub(crate) fn register(&mut self, waker: &Waker) {
         // Safety:
         // Diatomic waker requires we do not concurrently run
         // "register", "unregister", and "wait_until".
         // we only call register with mut access, thus we are safe.
-        unsafe { self.meta.waker.register(waker) }
+        let meta = unsafe { &*ptr::addr_of!((*self.ptr.as_ptr()).meta) };
+        unsafe { meta.waker.register(waker) }
     }
 
-    fn get(&self, index: usize) -> Waker {
-        self.meta.inc_strong();
-        let ptr: *mut ArcSliceInner = NonNull::as_ptr(self.ptr);
-
+    fn get(&self, index: usize) -> ManuallyDrop<Waker> {
         // SAFETY: This cannot go through Deref::deref or RcBoxPtr::inner because
         // this is required to retain raw/mut provenance such that e.g. `get_mut` can
         // write through the pointer after the Rc is recovered through `from_raw`.
-        let slot = unsafe { (ptr::addr_of_mut!((*ptr).slice) as *mut ArcSlotInner).add(index) };
+        let slice = unsafe { ptr::addr_of!((*self.ptr.as_ptr()).slice) as *const ArcSlotInner };
+        let slot = unsafe { slice.add(index) };
+
         debug_assert_eq!(
             unsafe { (*slot).index },
             index,
@@ -122,76 +137,18 @@ impl ArcSlice {
     ///
     /// Note that this is unsafe as it required mutual exclusion (only one
     /// thread can call this) to be guaranteed elsewhere.
-    pub(crate) unsafe fn pop(&self) -> ReadySlot<(usize, Waker)> {
-        match ArcSliceInner::pop(self) {
-            ReadySlot::Ready(i) => ReadySlot::Ready((i, self.get(i))),
-            ReadySlot::Inconsistent => ReadySlot::Inconsistent,
-            ReadySlot::None => ReadySlot::None,
-        }
-    }
-}
-
-impl ArcSliceInner {
-    /// The push function from the 1024cores intrusive MPSC queue algorithm.
-    /// https://www.1024cores.net/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue
-    ///
-    /// Safety: index must be within capacity
-    pub(crate) unsafe fn push(&self, index: usize) {
-        self.push_node(&self.slice[index] as *const _)
-    }
-
-    /// The push function from the 1024cores intrusive MPSC queue algorithm.
-    /// https://www.1024cores.net/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue
-    unsafe fn push_node(&self, node: *const ArcSlotInner) {
-        (*node).next.store(ptr::null_mut(), Ordering::Relaxed);
-
-        let prev = self.meta.list_head.swap(node as *mut _, Ordering::AcqRel);
-        (*prev).next.store(node as *mut _, Ordering::Release);
-    }
-
-    /// The pop function from the 1024cores intrusive MPSC queue algorithm
-    /// https://www.1024cores.net/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue
-    ///
-    /// Note that this is unsafe as it required mutual exclusion (only one
-    /// thread can call this) to be guaranteed elsewhere.
-    unsafe fn pop(&self) -> ReadySlot<usize> {
-        let mut tail = *self.meta.list_tail.get();
-        let mut next = (*tail).next.load(Ordering::Acquire);
-
-        if tail == self.meta.stub {
-            if next.is_null() {
-                return ReadySlot::None;
+    pub(crate) unsafe fn pop(&self) -> ReadySlot<(usize, ManuallyDrop<Waker>)> {
+        let queue = &*ptr::addr_of!((*self.ptr.as_ptr()).meta.queue);
+        match queue.try_dequeue_unchecked() {
+            Ok(slot) => {
+                (*slot.as_ptr()).wake_lock.store(false, Ordering::SeqCst);
+                let i = (*slot.as_ptr()).index;
+                ReadySlot::Ready((i, self.get(i)))
             }
-
-            *self.meta.list_tail.get() = next;
-            tail = next;
-            next = (*next).next.load(Ordering::Acquire);
+            Err(TryDequeueError::Inconsistent) => ReadySlot::Inconsistent,
+            Err(TryDequeueError::Empty) => ReadySlot::None,
+            Err(TryDequeueError::Busy) => unreachable!(),
         }
-
-        if !next.is_null() {
-            *self.meta.list_tail.get() = next;
-            debug_assert!(tail != self.meta.stub);
-
-            (*tail).wake_lock.store(false, Ordering::SeqCst);
-            return ReadySlot::Ready((*tail).index);
-        }
-
-        if self.meta.list_head.load(Ordering::Acquire) as *const _ != tail {
-            return ReadySlot::Inconsistent;
-        }
-
-        self.push_node(self.meta.stub);
-
-        next = (*tail).next.load(Ordering::Acquire);
-
-        if !next.is_null() {
-            *self.meta.list_tail.get() = next;
-
-            (*tail).wake_lock.store(false, Ordering::SeqCst);
-            return ReadySlot::Ready((*tail).index);
-        }
-
-        ReadySlot::Inconsistent
     }
 }
 
@@ -204,8 +161,8 @@ pub(crate) enum ReadySlot<T> {
 mod slot {
     use core::{
         alloc::Layout,
-        mem::align_of,
-        ptr,
+        mem::{align_of, ManuallyDrop},
+        ptr::{self, NonNull},
         sync::atomic::Ordering,
         task::{RawWaker, RawWakerVTable, Waker},
     };
@@ -274,7 +231,7 @@ mod slot {
         &*(ptr::slice_from_raw_parts(ptr, len + 1) as *const ArcSliceInner)
     }
 
-    pub(super) fn waker(ptr: *const ArcSlotInner) -> Waker {
+    pub(super) fn waker(ptr: *const ArcSlotInner) -> ManuallyDrop<Waker> {
         static VTABLE: &RawWakerVTable =
             &RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker);
 
@@ -301,7 +258,10 @@ mod slot {
 
             if !prev {
                 let inner = inner_ref(slot);
-                inner.push_node(slot);
+                inner
+                    .meta
+                    .queue
+                    .enqueue(NonNull::new_unchecked(slot.cast_mut()));
                 inner.meta.waker.notify();
             }
         }
@@ -317,7 +277,7 @@ mod slot {
         }
 
         let raw_waker = RawWaker::new(ptr as *const (), VTABLE);
-        unsafe { Waker::from_raw(raw_waker) }
+        unsafe { ManuallyDrop::new(Waker::from_raw(raw_waker)) }
     }
 }
 
@@ -408,8 +368,9 @@ unsafe fn drop_inner(p: *mut ArcSliceInnerMeta, capacity: usize) {
 
 impl Drop for ArcSlice {
     fn drop(&mut self) {
-        if self.meta.dec_strong() {
-            unsafe { drop_inner(self.ptr.as_ptr().cast(), self.meta.len) }
+        let meta = unsafe { &*ptr::addr_of!((*self.ptr.as_ptr()).meta) };
+        if meta.dec_strong() {
+            unsafe { drop_inner(self.ptr.as_ptr().cast(), meta.len) }
         }
     }
 }
@@ -439,26 +400,33 @@ impl ArcSlice {
         // The inner pointer is allocated and aligned, they just need to be initialised
         unsafe {
             let stub = ptr::addr_of_mut!((*inner).slice[cap]);
-            let meta = ArcSliceInnerMeta {
-                strong: AtomicUsize::new(1),
-                len: cap,
-                list_head: AtomicPtr::new(stub),
-                list_tail: UnsafeCell::new(stub),
-                stub,
-                waker: DiatomicWaker::new(),
-            };
-            ptr::write(ptr::addr_of_mut!((*inner).meta), meta);
-            for i in 0..=cap {
+
+            for i in 0..cap {
                 ptr::write(
                     ptr::addr_of_mut!((*inner).slice[i]),
                     ArcSlotInner {
                         index: i,
                         wake_lock: AtomicBool::new(false),
-                        // woken: AtomicBool::new(false),
-                        next: AtomicPtr::new(ptr::null_mut()),
+                        links: Links::new(),
                     },
                 );
             }
+            ptr::write(
+                ptr::addr_of_mut!((*inner).slice[cap]),
+                ArcSlotInner {
+                    index: cap,
+                    wake_lock: AtomicBool::new(false),
+                    links: Links::new_stub(),
+                },
+            );
+
+            let meta = ArcSliceInnerMeta {
+                strong: AtomicUsize::new(1),
+                len: cap,
+                waker: DiatomicWaker::new(),
+                queue: MpscQueue::new_with_stub(NonNull::new_unchecked(stub)),
+            };
+            ptr::write(ptr::addr_of_mut!((*inner).meta), meta);
         }
 
         Self {

@@ -17,6 +17,7 @@ bench = false
 futures-core = "0.3.21"
 pin-project-lite = "0.2"
 diatomic-waker = "0.2.0"
+cordyceps = "0.3.2"
 
 [dev-dependencies]
 futures = "0.3.21"
