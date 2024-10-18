@@ -14,7 +14,7 @@ bench = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-futures-core = "0.3.21"
+futures-core = { version = "0.3.21", default-features = false }
 pin-project-lite = "0.2"
 diatomic-waker = "0.2.0"
 cordyceps = "0.3.2"
