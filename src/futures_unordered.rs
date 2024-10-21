@@ -167,7 +167,9 @@ impl<F> FuturesUnordered<F> {
             Some(last) => last,
             None => {
                 self.groups.push(FuturesUnorderedBounded::new(MIN_CAPACITY));
-                self.groups.last_mut().unwrap()
+                self.groups
+                    .last_mut()
+                    .expect("group should have at least one entry")
             }
         };
         match last.try_push(fut) {
@@ -373,7 +375,7 @@ mod tests {
                 let waker = cx.waker().clone();
                 thread::spawn(move || {
                     thread::sleep(until.duration_since(Instant::now()));
-                    waker.wake()
+                    waker.wake();
                 });
                 Poll::Pending
             } else {
@@ -390,12 +392,12 @@ mod tests {
         type Output = ();
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            if !self.as_mut().done {
+            if self.as_mut().done {
+                Poll::Ready(())
+            } else {
                 cx.waker().wake_by_ref();
                 self.as_mut().done = true;
                 Poll::Pending
-            } else {
-                Poll::Ready(())
             }
         }
     }

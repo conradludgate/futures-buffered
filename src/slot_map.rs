@@ -1,4 +1,4 @@
-//! A SlotMap impl that uses a pre-allocated buffer to allow for pinned access.
+//! A `SlotMap` impl that uses a pre-allocated buffer to allow for pinned access.
 //!
 //! Implementation inspired by <https://github.com/orlp/slotmap>
 

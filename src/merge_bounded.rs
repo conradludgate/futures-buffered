@@ -51,7 +51,7 @@ impl<S> MergeBounded<S> {
     #[track_caller]
     pub fn push(&mut self, stream: S) {
         if self.try_push(stream).is_err() {
-            panic!("attempted to push into a full `Merge`")
+            panic!("attempted to push into a full `Merge`");
         }
     }
 
@@ -133,7 +133,7 @@ mod tests {
                 counter += n;
             }
             assert_eq!(counter, 4 + 9 + 25 + 49);
-        })
+        });
     }
 
     /// This test case uses channels so we'll have streams that return Pending from time to time.
@@ -245,7 +245,7 @@ mod tests {
             .unwrap();
 
         while !*done.borrow() {
-            pool.run_until_stalled()
+            pool.run_until_stalled();
         }
     }
 }

@@ -136,7 +136,7 @@ impl<F> FuturesUnorderedBounded<F> {
     #[track_caller]
     pub fn push(&mut self, fut: F) {
         if self.try_push(fut).is_err() {
-            panic!("attempted to push into a full `FuturesUnorderedBounded`")
+            panic!("attempted to push into a full `FuturesUnorderedBounded`");
         }
     }
 
@@ -189,13 +189,14 @@ impl<F> FuturesUnorderedBounded<F> {
         cx: &mut Context<'_>,
         poll_fn: PollFn<F, O>,
     ) -> Poll<Option<(usize, O)>> {
+        const MAX: usize = 61;
+
         if self.is_empty() {
             return Poll::Ready(None);
         }
 
         self.shared.register(cx.waker());
 
-        const MAX: usize = 61;
         let mut count = 0;
         loop {
             count += 1;
@@ -378,12 +379,12 @@ mod tests {
         type Output = ();
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            if !self.as_mut().done {
+            if self.as_mut().done {
+                Poll::Ready(())
+            } else {
                 cx.waker().wake_by_ref();
                 self.as_mut().done = true;
                 Poll::Pending
-            } else {
-                Poll::Ready(())
             }
         }
     }
@@ -551,7 +552,7 @@ mod tests {
             txs.push(tx);
         }
 
-        for _ in 0..(LEN / 61) + 1 {
+        for _ in 0..=(LEN / 61) {
             assert!(buffer.poll_next_unpin(&mut noop_context()).is_pending());
         }
 

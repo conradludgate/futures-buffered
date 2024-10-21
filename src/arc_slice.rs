@@ -33,12 +33,12 @@ use diatomic_waker::primitives::DiatomicWaker;
 /// Since the layouts of the internals are fixed (`repr(C)`) - we can count back from the index to find
 /// the shared data.
 ///
-/// For example, if we have an ArcSlot pointing at the number 2, we can count back to pointer 2 `usize`s + [`ArcSliceInnerMeta`] to find
+/// For example, if we have an `ArcSlot` pointing at the number 2, we can count back to pointer 2 `usize`s + [`ArcSliceInnerMeta`] to find
 /// the start of the [`ArcSlice`], and then we can insert `2` into the list of futures to poll, finally calling `waker.wake()`.
 ///
 /// Each slot also forms part of a linked list.
 pub(crate) struct ArcSlice {
-    ptr: NonNull<ArcSliceInner>,
+    ptr: NonNull<ArcSliceInnerMeta>,
     phantom: PhantomData<ArcSliceInner>,
 }
 
@@ -96,16 +96,22 @@ const _: () = {
 };
 
 impl ArcSlice {
+    fn slice_start(&self) -> *mut ArcSlotInner {
+        unsafe {
+            let ptr = self.ptr.as_ptr().cast::<u8>();
+            ptr.add(slice_offset()).cast::<ArcSlotInner>()
+        }
+    }
+
     /// The push function from the 1024cores intrusive MPSC queue algorithm.
-    /// https://www.1024cores.net/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue
+    /// <https://www.1024cores.net/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue>
     ///
     /// Safety: index must be within capacity
     pub(crate) unsafe fn push(&self, index: usize) {
-        let queue = &*ptr::addr_of!((*self.ptr.as_ptr()).meta.queue);
-        let slice = ptr::addr_of!((*self.ptr.as_ptr()).slice) as *const ArcSlotInner;
-        let slot = slice.add(index);
+        let queue = &*ptr::addr_of!((*self.ptr.as_ptr()).queue);
+        let slot = self.slice_start().add(index);
 
-        queue.enqueue(NonNull::new_unchecked(slot.cast_mut()));
+        queue.enqueue(NonNull::new_unchecked(slot));
     }
 
     /// Register the waker
@@ -114,7 +120,7 @@ impl ArcSlice {
         // Diatomic waker requires we do not concurrently run
         // "register", "unregister", and "wait_until".
         // we only call register with mut access, thus we are safe.
-        let meta = unsafe { &*ptr::addr_of!((*self.ptr.as_ptr()).meta) };
+        let meta = unsafe { &*self.ptr.as_ptr() };
         unsafe { meta.waker.register(waker) }
     }
 
@@ -122,8 +128,7 @@ impl ArcSlice {
         // SAFETY: This cannot go through Deref::deref or RcBoxPtr::inner because
         // this is required to retain raw/mut provenance such that e.g. `get_mut` can
         // write through the pointer after the Rc is recovered through `from_raw`.
-        let slice = unsafe { ptr::addr_of!((*self.ptr.as_ptr()).slice) as *const ArcSlotInner };
-        let slot = unsafe { slice.add(index) };
+        let slot = unsafe { self.slice_start().add(index) };
 
         debug_assert_eq!(
             unsafe { (*slot).index },
@@ -138,7 +143,7 @@ impl ArcSlice {
     /// Note that this is unsafe as it required mutual exclusion (only one
     /// thread can call this) to be guaranteed elsewhere.
     pub(crate) unsafe fn pop(&self) -> ReadySlot<(usize, ManuallyDrop<Waker>)> {
-        let queue = &*ptr::addr_of!((*self.ptr.as_ptr()).meta.queue);
+        let queue = &*ptr::addr_of!((*self.ptr.as_ptr()).queue);
         match queue.try_dequeue_unchecked() {
             Ok(slot) => {
                 (*slot.as_ptr()).wake_lock.store(false, Ordering::SeqCst);
@@ -160,53 +165,23 @@ pub(crate) enum ReadySlot<T> {
 
 mod slot {
     use core::{
-        alloc::Layout,
-        mem::{align_of, ManuallyDrop},
-        ptr::{self, NonNull},
+        mem::ManuallyDrop,
+        ptr::NonNull,
         sync::atomic::Ordering,
         task::{RawWaker, RawWakerVTable, Waker},
     };
 
-    use super::{ArcSliceInner, ArcSliceInnerMeta, ArcSlotInner};
+    use super::{slice_offset, ArcSliceInnerMeta, ArcSlotInner};
 
     /// Traverses back the [`ArcSlice`] to find the [`ArcSliceInnerMeta`] pointer
     ///
     /// # Safety:
     /// `ptr` must be from an `ArcSlot` originally
     unsafe fn meta_raw(ptr: *mut ArcSlotInner) -> *mut ArcSliceInnerMeta {
-        fn padding_needed_for(layout: &Layout, align: usize) -> usize {
-            let len = layout.size();
-
-            // Rounded up value is:
-            //   len_rounded_up = (len + align - 1) & !(align - 1);
-            // and then we return the padding difference: `len_rounded_up - len`.
-            //
-            // We use modular arithmetic throughout:
-            //
-            // 1. align is guaranteed to be > 0, so align - 1 is always
-            //    valid.
-            //
-            // 2. `len + align - 1` can overflow by at most `align - 1`,
-            //    so the &-mask with `!(align - 1)` will ensure that in the
-            //    case of overflow, `len_rounded_up` will itself be 0.
-            //    Thus the returned padding, when added to `len`, yields 0,
-            //    which trivially satisfies the alignment `align`.
-            //
-            // (Of course, attempts to allocate blocks of memory whose
-            // size and padding overflow in the above manner should cause
-            // the allocator to yield an error anyway.)
-
-            let len_rounded_up = len.wrapping_add(align).wrapping_sub(1) & !align.wrapping_sub(1);
-            len_rounded_up.wrapping_sub(len)
-        }
-
         let index = (*ptr).index;
         let slice_start = ptr.sub(index);
 
-        let layout = Layout::new::<ArcSliceInnerMeta>();
-        let offset = layout.size() + padding_needed_for(&layout, align_of::<ArcSlotInner>());
-
-        unsafe { slice_start.cast::<u8>().sub(offset) }.cast::<ArcSliceInnerMeta>()
+        unsafe { slice_start.cast::<u8>().sub(slice_offset()) }.cast::<ArcSliceInnerMeta>()
     }
 
     /// Traverses back the [`ArcSlice`] to find the [`ArcSliceInnerMeta`] pointer
@@ -215,20 +190,7 @@ mod slot {
     /// * `ptr` must be from an `ArcSlot` originally
     /// * The original `ArcSlot` must outlive `'a`
     unsafe fn meta_ref<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInnerMeta {
-        unsafe { &*meta_raw(ptr as *mut ArcSlotInner) }
-    }
-
-    /// Traverses back the [`ArcSlice`] to find the [`ArcSliceInner`] pointer
-    ///
-    /// # Safety:
-    /// * `ptr` must be from an `ArcSlot` originally
-    /// * The original `ArcSlot` must outlive `'a`
-    unsafe fn inner_ref<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInner {
-        let ptr = meta_raw(ptr as *mut ArcSlotInner);
-        let len = *core::ptr::addr_of!((*ptr).len);
-
-        let ptr = ptr as *const ArcSliceInnerMeta as *const ArcSlotInner;
-        &*(ptr::slice_from_raw_parts(ptr, len + 1) as *const ArcSliceInner)
+        unsafe { &*meta_raw(ptr.cast_mut()) }
     }
 
     pub(super) fn waker(ptr: *const ArcSlotInner) -> ManuallyDrop<Waker> {
@@ -257,12 +219,9 @@ mod slot {
             let prev = node.wake_lock.swap(true, Ordering::SeqCst);
 
             if !prev {
-                let inner = inner_ref(slot);
-                inner
-                    .meta
-                    .queue
-                    .enqueue(NonNull::new_unchecked(slot.cast_mut()));
-                inner.meta.waker.notify();
+                let meta = meta_ref(slot);
+                meta.queue.enqueue(NonNull::new_unchecked(slot.cast_mut()));
+                meta.waker.notify();
             }
         }
 
@@ -271,12 +230,12 @@ mod slot {
             let meta = meta_ref(waker.cast());
             if meta.dec_strong() {
                 unsafe {
-                    super::drop_inner(meta_raw(waker.cast::<ArcSlotInner>() as *mut _), meta.len)
+                    super::drop_inner(meta_raw(waker.cast::<ArcSlotInner>().cast_mut()), meta.len);
                 }
             }
         }
 
-        let raw_waker = RawWaker::new(ptr as *const (), VTABLE);
+        let raw_waker = RawWaker::new(ptr.cast(), VTABLE);
         unsafe { ManuallyDrop::new(Waker::from_raw(raw_waker)) }
     }
 }
@@ -352,6 +311,37 @@ impl ArcSliceInnerMeta {
     }
 }
 
+fn slice_offset() -> usize {
+    fn padding_needed_for(layout: &Layout, align: usize) -> usize {
+        let len = layout.size();
+
+        // Rounded up value is:
+        //   len_rounded_up = (len + align - 1) & !(align - 1);
+        // and then we return the padding difference: `len_rounded_up - len`.
+        //
+        // We use modular arithmetic throughout:
+        //
+        // 1. align is guaranteed to be > 0, so align - 1 is always
+        //    valid.
+        //
+        // 2. `len + align - 1` can overflow by at most `align - 1`,
+        //    so the &-mask with `!(align - 1)` will ensure that in the
+        //    case of overflow, `len_rounded_up` will itself be 0.
+        //    Thus the returned padding, when added to `len`, yields 0,
+        //    which trivially satisfies the alignment `align`.
+        //
+        // (Of course, attempts to allocate blocks of memory whose
+        // size and padding overflow in the above manner should cause
+        // the allocator to yield an error anyway.)
+
+        let len_rounded_up = len.wrapping_add(align).wrapping_sub(1) & !align.wrapping_sub(1);
+        len_rounded_up.wrapping_sub(len)
+    }
+
+    let layout = Layout::new::<ArcSliceInnerMeta>();
+    layout.size() + padding_needed_for(&layout, core::mem::align_of::<ArcSlotInner>())
+}
+
 /// Drops the internals of the [`ArcSlice`].
 ///
 /// # Safety:
@@ -368,7 +358,7 @@ unsafe fn drop_inner(p: *mut ArcSliceInnerMeta, capacity: usize) {
 
 impl Drop for ArcSlice {
     fn drop(&mut self) {
-        let meta = unsafe { &*ptr::addr_of!((*self.ptr.as_ptr()).meta) };
+        let meta = unsafe { &*self.ptr.as_ptr() };
         if meta.dec_strong() {
             unsafe { drop_inner(self.ptr.as_ptr().cast(), meta.len) }
         }
@@ -391,19 +381,18 @@ impl ArcSlice {
             handle_alloc_error(arc_slice_layout)
         }
 
-        // Initialize the ArcInner
-        let inner = ptr::slice_from_raw_parts_mut(ptr.cast::<ArcSlotInner>(), cap + 1)
-            as *mut ArcSliceInner;
-        debug_assert_eq!(unsafe { Layout::for_value(&*inner) }, arc_slice_layout);
+        // meta should be the first item in the alloc
+        let meta = ptr.cast::<ArcSliceInnerMeta>();
+        let slice = unsafe { ptr.add(slice_offset()).cast::<ArcSlotInner>() };
 
         // SAFETY:
         // The inner pointer is allocated and aligned, they just need to be initialised
         unsafe {
-            let stub = ptr::addr_of_mut!((*inner).slice[cap]);
+            let stub = slice.add(cap);
 
             for i in 0..cap {
                 ptr::write(
-                    ptr::addr_of_mut!((*inner).slice[i]),
+                    slice.add(i),
                     ArcSlotInner {
                         index: i,
                         wake_lock: AtomicBool::new(false),
@@ -412,7 +401,7 @@ impl ArcSlice {
                 );
             }
             ptr::write(
-                ptr::addr_of_mut!((*inner).slice[cap]),
+                slice.add(cap),
                 ArcSlotInner {
                     index: cap,
                     wake_lock: AtomicBool::new(false),
@@ -420,17 +409,19 @@ impl ArcSlice {
                 },
             );
 
-            let meta = ArcSliceInnerMeta {
-                strong: AtomicUsize::new(1),
-                len: cap,
-                waker: DiatomicWaker::new(),
-                queue: MpscQueue::new_with_stub(NonNull::new_unchecked(stub)),
-            };
-            ptr::write(ptr::addr_of_mut!((*inner).meta), meta);
+            ptr::write(
+                meta,
+                ArcSliceInnerMeta {
+                    strong: AtomicUsize::new(1),
+                    len: cap,
+                    waker: DiatomicWaker::new(),
+                    queue: MpscQueue::new_with_stub(NonNull::new_unchecked(stub)),
+                },
+            );
         }
 
         Self {
-            ptr: unsafe { NonNull::new_unchecked(inner) },
+            ptr: unsafe { NonNull::new_unchecked(meta) },
             phantom: PhantomData,
         }
     }

@@ -93,9 +93,13 @@
 //! }
 //! # Ok(()) }
 //! ```
+#![no_std]
 
-#![cfg_attr(not(test), no_std)]
 extern crate alloc;
+
+#[cfg(test)]
+#[macro_use(vec, dbg)]
+extern crate std;
 
 use core::future::Future;
 use futures_core::Stream;

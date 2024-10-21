@@ -182,7 +182,7 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
     #[track_caller]
     pub fn push_back(&mut self, future: Fut) {
         if self.try_push_back(future).is_err() {
-            panic!("attempted to push into a full `FuturesOrderedBounded`")
+            panic!("attempted to push into a full `FuturesOrderedBounded`");
         }
     }
 
@@ -199,7 +199,7 @@ impl<Fut: Future> FuturesOrderedBounded<Fut> {
     #[track_caller]
     pub fn push_front(&mut self, future: Fut) {
         if self.try_push_front(future).is_err() {
-            panic!("attempted to push into a full `FuturesOrderedBounded`")
+            panic!("attempted to push into a full `FuturesOrderedBounded`");
         }
     }
 }
@@ -208,9 +208,10 @@ impl<Fut: Future> Stream for FuturesOrderedBounded<Fut> {
     type Item = Fut::Output;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        const MSB: usize = !(usize::MAX >> 1);
+
         let this = &mut *self;
 
-        const MSB: usize = !(usize::MAX >> 1);
         // house keeping if the indices gets too high
         if this.next_outgoing_index.0 & MSB == MSB {
             let mut ready_queue = core::mem::take(&mut this.queued_outputs).into_vec();
@@ -241,9 +242,9 @@ impl<Fut: Future> Stream for FuturesOrderedBounded<Fut> {
                     if output.index == this.next_outgoing_index.0 {
                         this.next_outgoing_index += 1;
                         return Poll::Ready(Some(output.data));
-                    } else {
-                        this.queued_outputs.push(output)
                     }
+
+                    this.queued_outputs.push(output);
                 }
                 None => return Poll::Ready(None),
             }

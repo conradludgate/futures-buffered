@@ -188,7 +188,7 @@ mod tests {
                 counter += n;
             }
             assert_eq!(counter, 4 + 9 + 25 + 49);
-        })
+        });
     }
 
     #[test]
@@ -198,28 +198,28 @@ mod tests {
             let b = stream::repeat(3).take(3);
             let mut s = MergeUnbounded::default();
             assert_eq!(s.next().await, None);
-            assert_eq!(s.is_empty(), true);
+            assert!(s.is_empty());
             assert_eq!(s.len(), 0);
 
             s.push(a);
             s.push(b);
 
-            assert_eq!(s.is_empty(), false);
+            assert!(!s.is_empty());
             assert_eq!(s.len(), 2);
 
             let mut counter = 0;
             while let Some(n) = s.next().await {
                 counter += n;
-                assert_eq!(s.is_empty(), false);
+                assert!(!s.is_empty());
             }
 
-            assert_eq!(s.is_empty(), true);
+            assert!(s.is_empty());
             assert_eq!(s.len(), 0);
 
             let b = stream::repeat(4).take(4);
             s.push(b);
 
-            assert_eq!(s.is_empty(), false);
+            assert!(!s.is_empty());
             assert_eq!(s.len(), 1);
 
             while let Some(n) = s.next().await {
@@ -228,9 +228,9 @@ mod tests {
 
             assert_eq!(counter, 4 + 9 + 16);
 
-            assert_eq!(s.is_empty(), true);
+            assert!(s.is_empty());
             assert_eq!(s.len(), 0);
-        })
+        });
     }
 
     /// This test case uses channels so we'll have streams that return Pending from time to time.
@@ -342,7 +342,7 @@ mod tests {
             .unwrap();
 
         while !*done.borrow() {
-            pool.run_until_stalled()
+            pool.run_until_stalled();
         }
     }
 }

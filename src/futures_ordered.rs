@@ -137,9 +137,10 @@ impl<Fut: Future> Stream for FuturesOrdered<Fut> {
     type Item = Fut::Output;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        const MSB: usize = !(usize::MAX >> 1);
+
         let this = &mut *self;
 
-        const MSB: usize = !(usize::MAX >> 1);
         // house keeping if the indices gets too high
         if this.next_outgoing_index.0 & MSB == MSB {
             let mut ready_queue = core::mem::take(&mut this.queued_outputs).into_vec();
@@ -148,7 +149,7 @@ impl<Fut: Future> Stream for FuturesOrdered<Fut> {
             }
             this.queued_outputs = ready_queue.into();
 
-            for group in this.in_progress_queue.groups.iter_mut() {
+            for group in &mut this.in_progress_queue.groups {
                 for task in group.tasks.iter_mut() {
                     *task.project().index ^= MSB;
                 }
@@ -172,9 +173,9 @@ impl<Fut: Future> Stream for FuturesOrdered<Fut> {
                     if output.index == this.next_outgoing_index.0 {
                         this.next_outgoing_index += 1;
                         return Poll::Ready(Some(output.data));
-                    } else {
-                        this.queued_outputs.push(output)
                     }
+
+                    this.queued_outputs.push(output);
                 }
                 None => return Poll::Ready(None),
             }
