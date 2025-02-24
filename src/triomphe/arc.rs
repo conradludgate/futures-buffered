@@ -15,7 +15,7 @@ use core::ptr::{self, NonNull};
 use core::sync::atomic;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
-use crate::triomphe::{abort, ArcBorrow, HeaderSlice, OffsetArc, UniqueArc};
+use crate::triomphe::{abort, ArcBorrow, HeaderSlice};
 
 /// A soft limit on the amount of references that may be made to an `Arc`.
 ///
@@ -83,63 +83,6 @@ impl<T> Arc<T> {
                 phantom: PhantomData,
             }
         }
-    }
-
-    /// Temporarily converts |self| into a bonafide OffsetArc and exposes it to the
-    /// provided callback. The refcount is not modified.
-    #[inline(always)]
-    pub fn with_raw_offset_arc<F, U>(&self, f: F) -> U
-    where
-        F: FnOnce(&OffsetArc<T>) -> U,
-    {
-        // Synthesize transient Arc, which never touches the refcount of the ArcInner.
-        // Store transient in `ManuallyDrop`, to leave the refcount untouched.
-        let transient = unsafe { ManuallyDrop::new(Arc::into_raw_offset(ptr::read(self))) };
-
-        // Expose the transient Arc to the callback, which may clone it if it wants.
-        f(&transient)
-    }
-
-    /// Converts an `Arc` into a `OffsetArc`. This consumes the `Arc`, so the refcount
-    /// is not modified.
-    #[inline]
-    pub fn into_raw_offset(a: Self) -> OffsetArc<T> {
-        unsafe {
-            OffsetArc {
-                ptr: ptr::NonNull::new_unchecked(Arc::into_raw(a) as *mut T),
-                phantom: PhantomData,
-            }
-        }
-    }
-
-    /// Converts a `OffsetArc` into an `Arc`. This consumes the `OffsetArc`, so the refcount
-    /// is not modified.
-    #[inline]
-    pub fn from_raw_offset(a: OffsetArc<T>) -> Self {
-        let a = ManuallyDrop::new(a);
-        let ptr = a.ptr.as_ptr();
-        unsafe { Arc::from_raw(ptr) }
-    }
-
-    /// Returns the inner value, if the [`Arc`] has exactly one strong reference.
-    ///
-    /// Otherwise, an [`Err`] is returned with the same [`Arc`] that was
-    /// passed in.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use triomphe::Arc;
-    ///
-    /// let x = Arc::new(3);
-    /// assert_eq!(Arc::try_unwrap(x), Ok(3));
-    ///
-    /// let x = Arc::new(4);
-    /// let _y = Arc::clone(&x);
-    /// assert_eq!(*Arc::try_unwrap(x).unwrap_err(), 4);
-    /// ```
-    pub fn try_unwrap(this: Self) -> Result<T, Self> {
-        Self::try_unique(this).map(UniqueArc::into_inner)
     }
 }
 
@@ -386,20 +329,6 @@ impl<T> Arc<MaybeUninit<T>> {
         Arc::new(MaybeUninit::<T>::uninit())
     }
 
-    /// Calls `MaybeUninit::write` on the value contained.
-    ///
-    /// ## Panics
-    ///
-    /// If the `Arc` is not unique.
-    #[deprecated(
-        since = "0.1.7",
-        note = "this function previously was UB and now panics for non-unique `Arc`s. Use `UniqueArc::write` instead."
-    )]
-    #[track_caller]
-    pub fn write(&mut self, val: T) -> &mut T {
-        UniqueArc::write(must_be_unique(self), val)
-    }
-
     /// Obtain a mutable pointer to the stored `MaybeUninit<T>`.
     pub fn as_mut_ptr(&mut self) -> *mut MaybeUninit<T> {
         unsafe { &mut (*self.ptr()).data }
@@ -415,21 +344,6 @@ impl<T> Arc<MaybeUninit<T>> {
 }
 
 impl<T> Arc<[MaybeUninit<T>]> {
-    /// Create an Arc contains an array `[MaybeUninit<T>]` of `len`.
-    pub fn new_uninit_slice(len: usize) -> Self {
-        UniqueArc::new_uninit_slice(len).shareable()
-    }
-
-    /// Obtain a mutable slice to the stored `[MaybeUninit<T>]`.
-    #[deprecated(
-        since = "0.1.8",
-        note = "this function previously was UB and now panics for non-unique `Arc`s. Use `UniqueArc` or `get_mut` instead."
-    )]
-    #[track_caller]
-    pub fn as_mut_slice(&mut self) -> &mut [MaybeUninit<T>] {
-        must_be_unique(self)
-    }
-
     /// # Safety
     ///
     /// Must initialize all fields before calling this function.
@@ -516,35 +430,6 @@ impl<T: Clone> Arc<T> {
             &mut (*this.ptr()).data
         }
     }
-
-    /// Makes a `UniqueArc` from an `Arc`, cloning if necessary.
-    ///
-    /// If this `Arc` is uniquely owned, `make_unique()` will provide a `UniqueArc`
-    /// containing `this`. If not, `make_unique()` will create a _new_ `Arc`
-    /// with a copy of the contents, update `this` to point to it, and provide
-    /// a `UniqueArc` to it.
-    ///
-    /// This is useful for implementing copy-on-write schemes where you wish to
-    /// avoid copying things if your `Arc` is not shared.
-    #[inline]
-    pub fn make_unique(this: &mut Self) -> &mut UniqueArc<T> {
-        if !this.is_unique() {
-            // Another pointer exists; clone
-            *this = Arc::new(T::clone(this));
-        }
-
-        unsafe {
-            // Safety: this is either unique or just created (which is also unique)
-            UniqueArc::from_arc_ref(this)
-        }
-    }
-
-    /// If we have the only reference to `T` then unwrap it. Otherwise, clone `T` and return the clone.
-    ///
-    /// Assuming `arc_t` is of type `Arc<T>`, this function is functionally equivalent to `(*arc_t).clone()`, but will avoid cloning the inner value where possible.
-    pub fn unwrap_or_clone(this: Arc<T>) -> T {
-        Self::try_unwrap(this).unwrap_or_else(|this| T::clone(&this))
-    }
 }
 
 impl<T: ?Sized> Arc<T> {
@@ -561,11 +446,6 @@ impl<T: ?Sized> Arc<T> {
         }
     }
 
-    /// Provides unique access to the arc _if_ the `Arc` is uniquely owned.
-    pub fn get_unique(this: &mut Self) -> Option<&mut UniqueArc<T>> {
-        Self::try_as_unique(this).ok()
-    }
-
     /// Whether or not the `Arc` is uniquely owned (is the refcount 1?).
     pub fn is_unique(&self) -> bool {
         // See the extensive discussion in [1] for why this needs to be Acquire.
@@ -577,46 +457,6 @@ impl<T: ?Sized> Arc<T> {
     /// Gets the number of [`Arc`] pointers to this allocation
     pub fn count(this: &Self) -> usize {
         this.inner().count.load(Acquire)
-    }
-
-    /// Returns a [`UniqueArc`] if the [`Arc`] has exactly one strong reference.
-    ///
-    /// Otherwise, an [`Err`] is returned with the same [`Arc`] that was
-    /// passed in.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use triomphe::{Arc, UniqueArc};
-    ///
-    /// let x = Arc::new(3);
-    /// assert_eq!(UniqueArc::into_inner(Arc::try_unique(x).unwrap()), 3);
-    ///
-    /// let x = Arc::new(4);
-    /// let _y = Arc::clone(&x);
-    /// assert_eq!(
-    ///     *Arc::try_unique(x).map(UniqueArc::into_inner).unwrap_err(),
-    ///     4,
-    /// );
-    /// ```
-    pub fn try_unique(this: Self) -> Result<UniqueArc<T>, Self> {
-        if this.is_unique() {
-            // Safety: The current arc is unique and making a `UniqueArc`
-            //         from it is sound
-            unsafe { Ok(UniqueArc::from_arc(this)) }
-        } else {
-            Err(this)
-        }
-    }
-
-    pub(crate) fn try_as_unique(this: &mut Self) -> Result<&mut UniqueArc<T>, &mut Self> {
-        if this.is_unique() {
-            // Safety: The current arc is unique and making a `UniqueArc`
-            //         from it is sound
-            unsafe { Ok(UniqueArc::from_arc_ref(this)) }
-        } else {
-            Err(this)
-        }
     }
 
     fn drop_inner(&mut self) {
@@ -741,12 +581,6 @@ impl<T> From<T> for Arc<T> {
     }
 }
 
-impl<A> FromIterator<A> for Arc<[A]> {
-    fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
-        UniqueArc::from_iter(iter).shareable()
-    }
-}
-
 impl<T: ?Sized> borrow::Borrow<T> for Arc<T> {
     #[inline]
     fn borrow(&self) -> &T {
@@ -761,15 +595,6 @@ impl<T: ?Sized> AsRef<T> for Arc<T> {
     }
 }
 
-
-#[track_caller]
-fn must_be_unique<T: ?Sized>(arc: &mut Arc<T>) -> &mut UniqueArc<T> {
-    match Arc::try_as_unique(arc) {
-        Ok(unique) => unique,
-        Err(this) => panic!("`Arc` must be unique in order for this operation to be safe, there are currently {} copies", Arc::count(this)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::triomphe::arc::Arc;
@@ -779,94 +604,94 @@ mod tests {
     use core::iter::FromIterator;
     use core::mem::MaybeUninit;
 
-    #[test]
-    fn try_unwrap() {
-        let x = Arc::new(100usize);
-        let y = x.clone();
+    // #[test]
+    // fn try_unwrap() {
+    //     let x = Arc::new(100usize);
+    //     let y = x.clone();
 
-        // The count should be two so `try_unwrap()` should fail
-        assert_eq!(Arc::count(&x), 2);
-        assert!(Arc::try_unwrap(x).is_err());
+    //     // The count should be two so `try_unwrap()` should fail
+    //     assert_eq!(Arc::count(&x), 2);
+    //     assert!(Arc::try_unwrap(x).is_err());
 
-        // Since `x` has now been dropped, the count should be 1
-        // and `try_unwrap()` should succeed
-        assert_eq!(Arc::count(&y), 1);
-        assert_eq!(Arc::try_unwrap(y), Ok(100));
-    }
+    //     // Since `x` has now been dropped, the count should be 1
+    //     // and `try_unwrap()` should succeed
+    //     assert_eq!(Arc::count(&y), 1);
+    //     assert_eq!(Arc::try_unwrap(y), Ok(100));
+    // }
 
-    #[test]
-    #[allow(deprecated)]
-    fn maybeuninit() {
-        let mut arc: Arc<MaybeUninit<_>> = Arc::new_uninit();
-        arc.write(999);
+    // #[test]
+    // #[allow(deprecated)]
+    // fn maybeuninit() {
+    //     let mut arc: Arc<MaybeUninit<_>> = Arc::new_uninit();
+    //     arc.write(999);
 
-        let arc = unsafe { arc.assume_init() };
-        assert_eq!(*arc, 999);
-    }
+    //     let arc = unsafe { arc.assume_init() };
+    //     assert_eq!(*arc, 999);
+    // }
 
-    #[test]
-    #[allow(deprecated)]
-    #[should_panic = "`Arc` must be unique in order for this operation to be safe"]
-    fn maybeuninit_ub_to_proceed() {
-        let mut uninit = Arc::new_uninit();
-        let clone = uninit.clone();
+    // #[test]
+    // #[allow(deprecated)]
+    // #[should_panic = "`Arc` must be unique in order for this operation to be safe"]
+    // fn maybeuninit_ub_to_proceed() {
+    //     let mut uninit = Arc::new_uninit();
+    //     let clone = uninit.clone();
 
-        let x: &MaybeUninit<String> = &clone;
+    //     let x: &MaybeUninit<String> = &clone;
 
-        // This write invalidates `x` reference
-        uninit.write(String::from("nonononono"));
+    //     // This write invalidates `x` reference
+    //     uninit.write(String::from("nonononono"));
 
-        // Read invalidated reference to trigger UB
-        let _read = &*x;
-    }
+    //     // Read invalidated reference to trigger UB
+    //     let _read = &*x;
+    // }
 
-    #[test]
-    #[allow(deprecated)]
-    #[should_panic = "`Arc` must be unique in order for this operation to be safe"]
-    fn maybeuninit_slice_ub_to_proceed() {
-        let mut uninit = Arc::new_uninit_slice(13);
-        let clone = uninit.clone();
+    // #[test]
+    // #[allow(deprecated)]
+    // #[should_panic = "`Arc` must be unique in order for this operation to be safe"]
+    // fn maybeuninit_slice_ub_to_proceed() {
+    //     let mut uninit = Arc::new_uninit_slice(13);
+    //     let clone = uninit.clone();
 
-        let x: &[MaybeUninit<String>] = &clone;
+    //     let x: &[MaybeUninit<String>] = &clone;
 
-        // This write invalidates `x` reference
-        uninit.as_mut_slice()[0].write(String::from("nonononono"));
+    //     // This write invalidates `x` reference
+    //     uninit.as_mut_slice()[0].write(String::from("nonononono"));
 
-        // Read invalidated reference to trigger UB
-        let _read = &*x;
-    }
+    //     // Read invalidated reference to trigger UB
+    //     let _read = &*x;
+    // }
 
-    #[test]
-    fn maybeuninit_array() {
-        let mut arc: Arc<[MaybeUninit<_>]> = Arc::new_uninit_slice(5);
-        assert!(arc.is_unique());
-        #[allow(deprecated)]
-        for (uninit, index) in arc.as_mut_slice().iter_mut().zip(0..5) {
-            let ptr = uninit.as_mut_ptr();
-            unsafe { core::ptr::write(ptr, index) };
-        }
+    // #[test]
+    // fn maybeuninit_array() {
+    //     let mut arc: Arc<[MaybeUninit<_>]> = Arc::new_uninit_slice(5);
+    //     assert!(arc.is_unique());
+    //     #[allow(deprecated)]
+    //     for (uninit, index) in arc.as_mut_slice().iter_mut().zip(0..5) {
+    //         let ptr = uninit.as_mut_ptr();
+    //         unsafe { core::ptr::write(ptr, index) };
+    //     }
 
-        let arc = unsafe { arc.assume_init() };
-        assert!(arc.is_unique());
-        // Using clone to that the layout generated in new_uninit_slice is compatible
-        // with ArcInner.
-        let arcs = [
-            arc.clone(),
-            arc.clone(),
-            arc.clone(),
-            arc.clone(),
-            arc.clone(),
-        ];
-        assert_eq!(6, Arc::count(&arc));
-        // If the layout is not compatible, then the data might be corrupted.
-        assert_eq!(*arc, [0, 1, 2, 3, 4]);
+    //     let arc = unsafe { arc.assume_init() };
+    //     assert!(arc.is_unique());
+    //     // Using clone to that the layout generated in new_uninit_slice is compatible
+    //     // with ArcInner.
+    //     let arcs = [
+    //         arc.clone(),
+    //         arc.clone(),
+    //         arc.clone(),
+    //         arc.clone(),
+    //         arc.clone(),
+    //     ];
+    //     assert_eq!(6, Arc::count(&arc));
+    //     // If the layout is not compatible, then the data might be corrupted.
+    //     assert_eq!(*arc, [0, 1, 2, 3, 4]);
 
-        // Drop the arcs and check the count and the content to
-        // make sure it isn't corrupted.
-        drop(arcs);
-        assert!(arc.is_unique());
-        assert_eq!(*arc, [0, 1, 2, 3, 4]);
-    }
+    //     // Drop the arcs and check the count and the content to
+    //     // make sure it isn't corrupted.
+    //     drop(arcs);
+    //     assert!(arc.is_unique());
+    //     assert_eq!(*arc, [0, 1, 2, 3, 4]);
+    // }
 
     #[test]
     fn roundtrip() {
@@ -877,25 +702,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn from_iterator_exact_size() {
-        let arc = Arc::from_iter(Vec::from_iter(["ololo".to_owned(), "trololo".to_owned()]));
-        assert_eq!(1, Arc::count(&arc));
-        assert_eq!(["ololo".to_owned(), "trololo".to_owned()], *arc);
-    }
+    // #[test]
+    // fn from_iterator_exact_size() {
+    //     let arc = Arc::from_iter(Vec::from_iter(["ololo".to_owned(), "trololo".to_owned()]));
+    //     assert_eq!(1, Arc::count(&arc));
+    //     assert_eq!(["ololo".to_owned(), "trololo".to_owned()], *arc);
+    // }
 
-    #[test]
-    fn from_iterator_unknown_size() {
-        let arc = Arc::from_iter(
-            Vec::from_iter(["ololo".to_owned(), "trololo".to_owned()])
-                .into_iter()
-                // Filter is opaque to iterators, so the resulting iterator
-                // will report lower bound of 0.
-                .filter(|_| true),
-        );
-        assert_eq!(1, Arc::count(&arc));
-        assert_eq!(["ololo".to_owned(), "trololo".to_owned()], *arc);
-    }
+    // #[test]
+    // fn from_iterator_unknown_size() {
+    //     let arc = Arc::from_iter(
+    //         Vec::from_iter(["ololo".to_owned(), "trololo".to_owned()])
+    //             .into_iter()
+    //             // Filter is opaque to iterators, so the resulting iterator
+    //             // will report lower bound of 0.
+    //             .filter(|_| true),
+    //     );
+    //     assert_eq!(1, Arc::count(&arc));
+    //     assert_eq!(["ololo".to_owned(), "trololo".to_owned()], *arc);
+    // }
 
     #[test]
     fn roundtrip_slice() {

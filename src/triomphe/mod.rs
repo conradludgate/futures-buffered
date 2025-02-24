@@ -12,20 +12,14 @@
 
 mod arc;
 mod arc_borrow;
-mod arc_union;
 mod header;
 mod iterator_as_exact_size_iterator;
-mod offset_arc;
 mod thin_arc;
-mod unique_arc;
 
 pub use arc::*;
 pub use arc_borrow::*;
-pub use arc_union::*;
 pub use header::*;
-pub use offset_arc::*;
 pub use thin_arc::*;
-pub use unique_arc::*;
 
 // `no_std`-compatible abort by forcing a panic while already panicking.
 #[cold]
