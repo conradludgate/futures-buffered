@@ -90,7 +90,7 @@ impl<H, T> ThinArc<H, T> {
         I: Iterator<Item = T> + ExactSizeIterator,
     {
         let header = HeaderWithLength::new(header, items.len());
-        Arc::into_thin(Arc::from_header_and_iter(header, items))
+        Arc::into_thin(Arc::from_iter(items, |_| header))
     }
 }
 
@@ -123,20 +123,6 @@ impl<H, T> Drop for ThinArc<H, T> {
 impl<H, T> Arc<HeaderSliceWithLengthUnchecked<H, T>> {
     /// Converts an `Arc` into a `ThinArc`. This consumes the `Arc`, so the refcount
     /// is not modified.
-    ///
-    /// # Safety
-    /// Assumes that the header length matches the slice length.
-    #[inline]
-    unsafe fn into_thin_unchecked(a: Self) -> ThinArc<H, T> {
-        // Safety: invariant bubbled up
-        let this_protected: Arc<HeaderSliceWithLengthProtected<H, T>> =
-            unsafe { Arc::from_unprotected_unchecked(a) };
-
-        Arc::protected_into_thin(this_protected)
-    }
-
-    /// Converts an `Arc` into a `ThinArc`. This consumes the `Arc`, so the refcount
-    /// is not modified.
     #[inline]
     pub fn into_thin(a: Self) -> ThinArc<H, T> {
         assert_eq!(
@@ -144,8 +130,15 @@ impl<H, T> Arc<HeaderSliceWithLengthUnchecked<H, T>> {
             a.slice.len(),
             "Length needs to be correct for ThinArc to work"
         );
-        // Safety: invariant checked in assertion above
-        unsafe { Self::into_thin_unchecked(a) }
+
+        // Safety: HeaderSliceWithLengthProtected and HeaderSliceWithLengthUnchecked have the same layout
+        // and the safety invariant on HeaderSliceWithLengthProtected.inner is bubbled up
+        // The whole `Arc` should also be layout compatible (as a transparent wrapper around `NonNull` pointers with the same
+        // metadata type) but we still conservatively avoid a direct transmute here and use a pointer-cast instead.
+        let this_protected: Arc<HeaderSliceWithLengthProtected<H, T>> =
+            unsafe { Arc::from_raw_inner(Arc::into_raw_inner(a) as _) };
+
+        Arc::protected_into_thin(this_protected)
     }
 }
 
@@ -177,19 +170,6 @@ impl<H, T> Arc<HeaderSliceWithLengthProtected<H, T>> {
         let ptr = thin_to_thick(&a);
         unsafe { Arc::from_raw_inner(ptr) }
     }
-
-    /// Obtains a HeaderSliceWithLengthProtected from an unchecked HeaderSliceWithLengthUnchecked, wrapped in an Arc
-    ///
-    /// # Safety
-    /// Assumes that the header length matches the slice length.
-    #[inline]
-    unsafe fn from_unprotected_unchecked(a: Arc<HeaderSliceWithLengthUnchecked<H, T>>) -> Self {
-        // Safety: HeaderSliceWithLengthProtected and HeaderSliceWithLengthUnchecked have the same layout
-        // and the safety invariant on HeaderSliceWithLengthProtected.inner is bubbled up
-        // The whole `Arc` should also be layout compatible (as a transparent wrapper around `NonNull` pointers with the same
-        // metadata type) but we still conservatively avoid a direct transmute here and use a pointer-cast instead.
-        unsafe { Arc::from_raw_inner(Arc::into_raw_inner(a) as _) }
-    }
 }
 
 impl<H: fmt::Debug, T: fmt::Debug> fmt::Debug for ThinArc<H, T> {
@@ -200,20 +180,9 @@ impl<H: fmt::Debug, T: fmt::Debug> fmt::Debug for ThinArc<H, T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::triomphe::{Arc, HeaderWithLength, ThinArc};
+    use crate::triomphe::{HeaderWithLength, ThinArc};
     use alloc::vec;
     use core::clone::Clone;
-
-    #[test]
-    fn empty_thin() {
-        let header = HeaderWithLength::new(100u32, 0);
-        let x = Arc::from_header_and_iter(header, core::iter::empty::<i32>());
-        let y = Arc::into_thin(x.clone());
-        assert_eq!(y.header.header, 100);
-        assert!(y.slice.is_empty());
-        assert_eq!(x.header.header, 100);
-        assert!(x.slice.is_empty());
-    }
 
     #[test]
     fn thin_assert_padding() {
