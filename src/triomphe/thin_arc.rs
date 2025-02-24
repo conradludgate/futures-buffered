@@ -1,7 +1,4 @@
-use core::cmp::Ordering;
-use core::ffi::c_void;
 use core::fmt;
-use core::hash::{Hash, Hasher};
 use core::iter::{ExactSizeIterator, Iterator};
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
@@ -40,7 +37,7 @@ pub struct ThinArc<H, T> {
     // The safe API of `ThinArc` ensures that the length in the `HeaderWithLength`
     // corretcly set - or verified - upon creation of a `ThinArc` and can't be modified
     // to fall out of sync with the true slice length for this value & allocation.
-    ptr: ptr::NonNull<ArcInner<HeaderSlice<HeaderWithLength<H>, [T; 0]>>>,
+    pub(super) ptr: ptr::NonNull<ArcInner<HeaderSlice<HeaderWithLength<H>, [T; 0]>>>,
     phantom: PhantomData<(H, T)>,
 }
 
@@ -60,23 +57,6 @@ fn thin_to_thick<H, T>(arc: &ThinArc<H, T>) -> *mut ArcInner<HeaderSliceWithLeng
 }
 
 impl<H, T> ThinArc<H, T> {
-    /// Temporarily converts |self| into a bonafide Arc and exposes it to the
-    /// provided callback. The refcount is not modified.
-    #[inline]
-    pub fn with_arc<F, U>(&self, f: F) -> U
-    where
-        F: FnOnce(&Arc<HeaderSliceWithLengthUnchecked<H, T>>) -> U,
-    {
-        // Synthesize transient Arc, which never touches the refcount of the ArcInner.
-        let transient = ManuallyDrop::new(Arc::from_protected(unsafe {
-            Arc::from_raw_inner(thin_to_thick(self))
-        }));
-
-        // Expose the transient Arc to the callback, which may clone it if it wants
-        // and forward the result to the user
-        f(&transient)
-    }
-
     /// Temporarily converts |self| into a bonafide Arc and exposes it to the
     /// provided callback. The refcount is not modified.
     #[inline]
@@ -111,13 +91,6 @@ impl<H, T> ThinArc<H, T> {
     {
         let header = HeaderWithLength::new(header, items.len());
         Arc::into_thin(Arc::from_header_and_iter(header, items))
-    }
-
-    /// Returns the address on the heap of the ThinArc itself -- not the T
-    /// within it -- for memory reporting.
-    #[inline]
-    pub fn ptr(&self) -> *const c_void {
-        self.ptr.cast().as_ptr()
     }
 }
 
@@ -174,16 +147,6 @@ impl<H, T> Arc<HeaderSliceWithLengthUnchecked<H, T>> {
         // Safety: invariant checked in assertion above
         unsafe { Self::into_thin_unchecked(a) }
     }
-
-    /// Converts an `Arc` into a `ThinArc`. This consumes the `Arc`, so the refcount
-    /// is not modified.
-    #[inline]
-    fn from_protected(a: Arc<HeaderSliceWithLengthProtected<H, T>>) -> Self {
-        // Safety: HeaderSliceWithLengthProtected and HeaderSliceWithLengthUnchecked have the same layout
-        // The whole `Arc` should also be layout compatible (as a transparent wrapper around `NonNull` pointers with the same
-        // metadata type) but we still conservatively avoid a direct transmute here and use a pointer-cast instead.
-        unsafe { Arc::from_raw_inner(Arc::into_raw_inner(a) as _) }
-    }
 }
 
 impl<H, T> Arc<HeaderSliceWithLengthProtected<H, T>> {
@@ -229,44 +192,9 @@ impl<H, T> Arc<HeaderSliceWithLengthProtected<H, T>> {
     }
 }
 
-impl<H: PartialEq, T: PartialEq> PartialEq for ThinArc<H, T> {
-    #[inline]
-    fn eq(&self, other: &ThinArc<H, T>) -> bool {
-        ThinArc::with_arc(self, |a| ThinArc::with_arc(other, |b| *a == *b))
-    }
-}
-
-impl<H: Eq, T: Eq> Eq for ThinArc<H, T> {}
-
-impl<H: PartialOrd, T: PartialOrd> PartialOrd for ThinArc<H, T> {
-    #[inline]
-    fn partial_cmp(&self, other: &ThinArc<H, T>) -> Option<Ordering> {
-        ThinArc::with_arc(self, |a| ThinArc::with_arc(other, |b| a.partial_cmp(b)))
-    }
-}
-
-impl<H: Ord, T: Ord> Ord for ThinArc<H, T> {
-    #[inline]
-    fn cmp(&self, other: &ThinArc<H, T>) -> Ordering {
-        ThinArc::with_arc(self, |a| ThinArc::with_arc(other, |b| a.cmp(b)))
-    }
-}
-
-impl<H: Hash, T: Hash> Hash for ThinArc<H, T> {
-    fn hash<HSR: Hasher>(&self, state: &mut HSR) {
-        ThinArc::with_arc(self, |a| a.hash(state))
-    }
-}
-
 impl<H: fmt::Debug, T: fmt::Debug> fmt::Debug for ThinArc<H, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
-    }
-}
-
-impl<H, T> fmt::Pointer for ThinArc<H, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Pointer::fmt(&self.ptr(), f)
     }
 }
 
@@ -275,20 +203,6 @@ mod tests {
     use crate::triomphe::{Arc, HeaderWithLength, ThinArc};
     use alloc::vec;
     use core::clone::Clone;
-    use core::ops::Drop;
-    use core::sync::atomic;
-    use core::sync::atomic::Ordering::{Acquire, SeqCst};
-
-    #[derive(PartialEq)]
-    struct Canary(*mut atomic::AtomicUsize);
-
-    impl Drop for Canary {
-        fn drop(&mut self) {
-            unsafe {
-                (*self.0).fetch_add(1, SeqCst);
-            }
-        }
-    }
 
     #[test]
     fn empty_thin() {
@@ -317,50 +231,4 @@ mod tests {
         assert_eq!(a.slice[0].i, 0xdead);
         assert_eq!(a.slice[1].i, 0xbeef);
     }
-
-    #[test]
-    #[allow(clippy::redundant_clone, clippy::eq_op)]
-    fn slices_and_thin() {
-        let mut canary = atomic::AtomicUsize::new(0);
-        let c = Canary(&mut canary as *mut atomic::AtomicUsize);
-        let v = vec![5, 6];
-        let header = HeaderWithLength::new(c, v.len());
-        {
-            let x = Arc::into_thin(Arc::from_header_and_slice(header, &v));
-            let y = ThinArc::with_arc(&x, |q| q.clone());
-            let _ = y.clone();
-            let _ = x == x;
-            Arc::from_thin(x.clone());
-        }
-        assert_eq!(canary.load(Acquire), 1);
-    }
-
-    #[test]
-    #[allow(clippy::redundant_clone, clippy::eq_op)]
-    fn iter_and_thin() {
-        let mut canary = atomic::AtomicUsize::new(0);
-        let c = Canary(&mut canary as *mut atomic::AtomicUsize);
-        let v = vec![5, 6];
-        let header = HeaderWithLength::new(c, v.len());
-        {
-            let x = Arc::into_thin(Arc::from_header_and_iter(header, v.into_iter()));
-            let y = ThinArc::with_arc(&x, |q| q.clone());
-            let _ = y.clone();
-            let _ = x == x;
-            Arc::from_thin(x.clone());
-        }
-        assert_eq!(canary.load(Acquire), 1);
-    }
-
-    #[allow(dead_code)]
-    const fn is_partial_ord<T: ?Sized + PartialOrd>() {}
-
-    #[allow(dead_code)]
-    const fn is_ord<T: ?Sized + Ord>() {}
-
-    // compile-time check that PartialOrd/Ord is correctly derived
-    const _: () = is_partial_ord::<ThinArc<f64, f64>>();
-    const _: () = is_partial_ord::<ThinArc<f64, u64>>();
-    const _: () = is_partial_ord::<ThinArc<u64, f64>>();
-    const _: () = is_ord::<ThinArc<u64, u64>>();
 }

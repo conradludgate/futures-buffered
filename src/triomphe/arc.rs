@@ -1,11 +1,7 @@
 use alloc::alloc::handle_alloc_error;
 use alloc::boxed::Box;
 use core::alloc::Layout;
-use core::borrow;
-use core::cmp::Ordering;
-use core::convert::From;
 use core::fmt;
-use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::ops::Deref;
@@ -46,24 +42,6 @@ pub struct Arc<T: ?Sized> {
 unsafe impl<T: ?Sized + Sync + Send> Send for Arc<T> {}
 unsafe impl<T: ?Sized + Sync + Send> Sync for Arc<T> {}
 
-impl<T> Arc<T> {
-    /// Construct an `Arc<T>`
-    #[inline]
-    pub fn new(data: T) -> Self {
-        let ptr = Box::into_raw(Box::new(ArcInner {
-            count: atomic::AtomicUsize::new(1),
-            data,
-        }));
-
-        unsafe {
-            Arc {
-                p: ptr::NonNull::new_unchecked(ptr),
-                phantom: PhantomData,
-            }
-        }
-    }
-}
-
 impl<T: ?Sized> Arc<T> {
     #[inline]
     pub(super) fn into_raw_inner(this: Self) -> *mut ArcInner<T> {
@@ -96,13 +74,6 @@ impl<T: ?Sized> Arc<T> {
     #[inline(never)]
     unsafe fn drop_slow(&mut self) {
         let _ = Box::from_raw(self.ptr());
-    }
-
-    /// Returns `true` if the two `Arc`s point to the same allocation in a vein similar to
-    /// [`ptr::eq`]. This function ignores the metadata of  `dyn Trait` pointers.
-    #[inline]
-    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        ptr::addr_eq(this.ptr(), other.ptr())
     }
 
     pub(crate) fn ptr(&self) -> *mut ArcInner<T> {
@@ -299,196 +270,8 @@ impl<T: ?Sized> Drop for Arc<T> {
     }
 }
 
-impl<T: ?Sized + PartialEq> PartialEq for Arc<T> {
-    fn eq(&self, other: &Arc<T>) -> bool {
-        // TODO: pointer equality is incorrect if `T` is not `Eq`.
-        Self::ptr_eq(self, other) || *(*self) == *(*other)
-    }
-
-    #[allow(clippy::partialeq_ne_impl)]
-    fn ne(&self, other: &Arc<T>) -> bool {
-        !Self::ptr_eq(self, other) && *(*self) != *(*other)
-    }
-}
-
-impl<T: ?Sized + PartialOrd> PartialOrd for Arc<T> {
-    fn partial_cmp(&self, other: &Arc<T>) -> Option<Ordering> {
-        (**self).partial_cmp(&**other)
-    }
-
-    fn lt(&self, other: &Arc<T>) -> bool {
-        *(*self) < *(*other)
-    }
-
-    fn le(&self, other: &Arc<T>) -> bool {
-        *(*self) <= *(*other)
-    }
-
-    fn gt(&self, other: &Arc<T>) -> bool {
-        *(*self) > *(*other)
-    }
-
-    fn ge(&self, other: &Arc<T>) -> bool {
-        *(*self) >= *(*other)
-    }
-}
-
-impl<T: ?Sized + Ord> Ord for Arc<T> {
-    fn cmp(&self, other: &Arc<T>) -> Ordering {
-        (**self).cmp(&**other)
-    }
-}
-
-impl<T: ?Sized + Eq> Eq for Arc<T> {}
-
-impl<T: ?Sized + fmt::Display> fmt::Display for Arc<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&**self, f)
-    }
-}
-
 impl<T: ?Sized + fmt::Debug> fmt::Debug for Arc<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
-}
-
-impl<T: ?Sized> fmt::Pointer for Arc<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Pointer::fmt(&self.ptr(), f)
-    }
-}
-
-impl<T: Default> Default for Arc<T> {
-    #[inline]
-    fn default() -> Arc<T> {
-        Arc::new(Default::default())
-    }
-}
-
-impl<T: ?Sized + Hash> Hash for Arc<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        (**self).hash(state)
-    }
-}
-
-impl<T> From<T> for Arc<T> {
-    #[inline]
-    fn from(t: T) -> Self {
-        Arc::new(t)
-    }
-}
-
-impl<T: ?Sized> borrow::Borrow<T> for Arc<T> {
-    #[inline]
-    fn borrow(&self) -> &T {
-        self
-    }
-}
-
-impl<T: ?Sized> AsRef<T> for Arc<T> {
-    #[inline]
-    fn as_ref(&self) -> &T {
-        self
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::triomphe::arc::Arc;
-
-    #[test]
-    fn arc_eq_and_cmp() {
-        [
-            [("*", &b"AB"[..]), ("*", &b"ab"[..])],
-            [("*", &b"AB"[..]), ("*", &b"a"[..])],
-            [("*", &b"A"[..]), ("*", &b"ab"[..])],
-            [("A", &b"*"[..]), ("a", &b"*"[..])],
-            [("a", &b"*"[..]), ("A", &b"*"[..])],
-            [("AB", &b"*"[..]), ("a", &b"*"[..])],
-            [("A", &b"*"[..]), ("ab", &b"*"[..])],
-        ]
-        .iter()
-        .for_each(|[lt @ (lh, ls), rt @ (rh, rs)]| {
-            let l = Arc::from_header_and_slice(lh, ls);
-            let r = Arc::from_header_and_slice(rh, rs);
-
-            assert_eq!(l, l);
-            assert_eq!(r, r);
-
-            assert_ne!(l, r);
-            assert_ne!(r, l);
-
-            assert_eq!(l <= l, lt <= lt, "{lt:?} <= {lt:?}");
-            assert_eq!(l >= l, lt >= lt, "{lt:?} >= {lt:?}");
-
-            assert_eq!(l < l, lt < lt, "{lt:?} < {lt:?}");
-            assert_eq!(l > l, lt > lt, "{lt:?} > {lt:?}");
-
-            assert_eq!(r <= r, rt <= rt, "{rt:?} <= {rt:?}");
-            assert_eq!(r >= r, rt >= rt, "{rt:?} >= {rt:?}");
-
-            assert_eq!(r < r, rt < rt, "{rt:?} < {rt:?}");
-            assert_eq!(r > r, rt > rt, "{rt:?} > {rt:?}");
-
-            assert_eq!(l < r, lt < rt, "{lt:?} < {rt:?}");
-            assert_eq!(r > l, rt > lt, "{rt:?} > {lt:?}");
-        })
-    }
-
-    #[test]
-    fn arc_eq_and_partial_cmp() {
-        [
-            [(0.0, &[0.0, 0.0][..]), (1.0, &[0.0, 0.0][..])],
-            [(1.0, &[0.0, 0.0][..]), (0.0, &[0.0, 0.0][..])],
-            [(0.0, &[0.0][..]), (0.0, &[0.0, 0.0][..])],
-            [(0.0, &[0.0, 0.0][..]), (0.0, &[0.0][..])],
-            [(0.0, &[1.0, 2.0][..]), (0.0, &[10.0, 20.0][..])],
-        ]
-        .iter()
-        .for_each(|[lt @ (lh, ls), rt @ (rh, rs)]| {
-            let l = Arc::from_header_and_slice(lh, ls);
-            let r = Arc::from_header_and_slice(rh, rs);
-
-            assert_eq!(l, l);
-            assert_eq!(r, r);
-
-            assert_ne!(l, r);
-            assert_ne!(r, l);
-
-            assert_eq!(l <= l, lt <= lt, "{lt:?} <= {lt:?}");
-            assert_eq!(l >= l, lt >= lt, "{lt:?} >= {lt:?}");
-
-            assert_eq!(l < l, lt < lt, "{lt:?} < {lt:?}");
-            assert_eq!(l > l, lt > lt, "{lt:?} > {lt:?}");
-
-            assert_eq!(r <= r, rt <= rt, "{rt:?} <= {rt:?}");
-            assert_eq!(r >= r, rt >= rt, "{rt:?} >= {rt:?}");
-
-            assert_eq!(r < r, rt < rt, "{rt:?} < {rt:?}");
-            assert_eq!(r > r, rt > rt, "{rt:?} > {rt:?}");
-
-            assert_eq!(l < r, lt < rt, "{lt:?} < {rt:?}");
-            assert_eq!(r > l, rt > lt, "{rt:?} > {lt:?}");
-        })
-    }
-
-    #[test]
-    fn test_partial_eq_bug() {
-        let float = f32::NAN;
-        assert_ne!(float, float);
-        let arc = Arc::new(f32::NAN);
-        // TODO: this is a bug.
-        assert_eq!(arc, arc);
-    }
-
-    #[allow(dead_code)]
-    const fn is_partial_ord<T: ?Sized + PartialOrd>() {}
-
-    #[allow(dead_code)]
-    const fn is_ord<T: ?Sized + Ord>() {}
-
-    // compile-time check that PartialOrd/Ord is correctly derived
-    const _: () = is_partial_ord::<Arc<f64>>();
-    const _: () = is_ord::<Arc<u64>>();
 }

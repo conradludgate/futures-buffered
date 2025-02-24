@@ -15,6 +15,7 @@ pub struct WithOffset<T> {
     pub value: T,
 }
 
+#[repr(transparent)]
 pub struct ThinArcItem<H, T> {
     ptr: ptr::NonNull<WithOffset<T>>,
     phantom: PhantomData<ThinArcList<H, T>>,
@@ -31,6 +32,7 @@ impl<H, T> Deref for ThinArcItem<H, T> {
 unsafe impl<H: Sync + Send, T: Sync + Send> Send for ThinArcItem<H, T> {}
 unsafe impl<H: Sync + Send, T: Sync + Send> Sync for ThinArcItem<H, T> {}
 
+#[repr(transparent)]
 pub struct ThinArcList<H, T> {
     inner: ThinArc<H, WithOffset<T>>,
 }
@@ -86,13 +88,17 @@ impl<H, T> ThinArcList<H, T> {
     where
         F: FnOnce(&ThinArcItem<H, T>) -> U,
     {
-        self.inner.with_arc(|inner| {
-            let transient = ManuallyDrop::new(ThinArcItem {
-                ptr: NonNull::from(&inner.slice[index]),
-                phantom: PhantomData,
-            });
-            f(&transient)
-        })
+        // very fiddly :(
+        let len = unsafe { (*self.inner.ptr.as_ptr()).data.header.length };
+        assert!(index < len);
+        let slice =
+            unsafe { ptr::addr_of!((*self.inner.ptr.as_ptr()).data.slice).cast::<WithOffset<T>>() };
+
+        let transient = ManuallyDrop::new(ThinArcItem {
+            ptr: unsafe { NonNull::new_unchecked(slice.add(index).cast_mut()) },
+            phantom: PhantomData,
+        });
+        f(&transient)
     }
 }
 
