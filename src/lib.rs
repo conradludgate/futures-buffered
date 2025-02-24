@@ -116,6 +116,7 @@ mod merge_unbounded;
 mod slot_map;
 mod try_buffered;
 mod try_join_all;
+mod triomphe;
 
 pub use buffered::{BufferUnordered, BufferedOrdered, BufferedStreamExt};
 pub use futures_ordered::FuturesOrdered;
