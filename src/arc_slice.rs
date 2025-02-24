@@ -1,3 +1,5 @@
+#![warn(unsafe_op_in_unsafe_fn)]
+
 use alloc::alloc::{dealloc, handle_alloc_error, Layout};
 use cordyceps::{
     mpsc_queue::{Links, TryDequeueError},
@@ -7,10 +9,11 @@ use core::{
     marker::PhantomData,
     mem::ManuallyDrop,
     ptr::{self, drop_in_place, NonNull},
-    sync::atomic::{self, AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{self, AtomicUsize, Ordering},
     task::Waker,
 };
 use diatomic_waker::primitives::DiatomicWaker;
+use spin::mutex::SpinMutex;
 
 /// [`ArcSlice`] is a fun optimisation. For `FuturesUnorderedBounded`, we have `n` slots for futures,
 /// and we create a separate context when polling each individual future to avoid having n^2 polling.
@@ -42,9 +45,8 @@ pub(crate) struct ArcSlice {
     phantom: PhantomData<ArcSliceInner>,
 }
 
-// This is repr(C) to future-proof against possible field-reordering, which
-// would interfere with otherwise safe [into|from]_raw() of transmutable
-// inner types.
+// The physical representation of ArcSlice.
+// A `ThinBox<ArcSliceInner>`
 #[repr(C)]
 pub(crate) struct ArcSliceInner {
     meta: ArcSliceInnerMeta,
@@ -58,16 +60,17 @@ pub(crate) struct ArcSliceInnerMeta {
     queue: MpscQueue<ArcSlotInner>,
 }
 
-// This is repr(C) to future-proof against possible field-reordering, which
-// would interfere with otherwise safe [into|from]_raw() of transmutable
-// inner types.
-#[repr(C)]
 pub(crate) struct ArcSlotInner {
-    index: usize,
-    wake_lock: AtomicBool,
     links: Links<Self>,
+    // if true, then this slot is already woken and queued for processing.
+    // if false, then this slot is available to be queued.
+    wake_lock: SpinMutex<bool>,
+    index: usize,
 }
 
+// SAFETY:
+// 1. ArcSlotInner will be pinned in memory within the ArcSlice allocation
+// 2. The `Links` object enforces ArcSlotInner to be !Unpin
 unsafe impl Linked<Links<Self>> for ArcSlotInner {
     type Handle = NonNull<Self>;
 
@@ -80,7 +83,9 @@ unsafe impl Linked<Links<Self>> for ArcSlotInner {
     }
 
     unsafe fn links(ptr: NonNull<Self>) -> NonNull<Links<Self>> {
-        NonNull::new_unchecked(ptr::addr_of_mut!((*ptr.as_ptr()).links))
+        let this = ptr.as_ptr();
+        let links = unsafe { ptr::addr_of_mut!((*this).links) };
+        unsafe { NonNull::new_unchecked(links) }
     }
 }
 
@@ -108,10 +113,10 @@ impl ArcSlice {
     ///
     /// Safety: index must be within capacity
     pub(crate) unsafe fn push(&self, index: usize) {
-        let queue = &*ptr::addr_of!((*self.ptr.as_ptr()).queue);
-        let slot = self.slice_start().add(index);
+        let queue = unsafe { &*ptr::addr_of!((*self.ptr.as_ptr()).queue) };
+        let slot = unsafe { self.slice_start().add(index) };
 
-        queue.enqueue(NonNull::new_unchecked(slot));
+        queue.enqueue(unsafe { NonNull::new_unchecked(slot) });
     }
 
     /// Register the waker
@@ -143,12 +148,12 @@ impl ArcSlice {
     /// Note that this is unsafe as it required mutual exclusion (only one
     /// thread can call this) to be guaranteed elsewhere.
     pub(crate) unsafe fn pop(&self) -> ReadySlot<(usize, ManuallyDrop<Waker>)> {
-        let queue = &*ptr::addr_of!((*self.ptr.as_ptr()).queue);
-        match queue.try_dequeue_unchecked() {
+        let queue = unsafe { &*ptr::addr_of!((*self.ptr.as_ptr()).queue) };
+        match unsafe { queue.try_dequeue_unchecked() } {
             Ok(slot) => {
-                (*slot.as_ptr()).wake_lock.store(false, Ordering::SeqCst);
-                let i = (*slot.as_ptr()).index;
-                ReadySlot::Ready((i, self.get(i)))
+                let slot = unsafe { &*slot.as_ptr() };
+                *slot.wake_lock.lock() = false;
+                ReadySlot::Ready((slot.index, self.get(slot.index)))
             }
             Err(TryDequeueError::Inconsistent) => ReadySlot::Inconsistent,
             Err(TryDequeueError::Empty) => ReadySlot::None,
@@ -167,7 +172,6 @@ mod slot {
     use core::{
         mem::ManuallyDrop,
         ptr::NonNull,
-        sync::atomic::Ordering,
         task::{RawWaker, RawWakerVTable, Waker},
     };
 
@@ -178,8 +182,8 @@ mod slot {
     /// # Safety:
     /// `ptr` must be from an `ArcSlot` originally
     unsafe fn meta_raw(ptr: *mut ArcSlotInner) -> *mut ArcSliceInnerMeta {
-        let index = (*ptr).index;
-        let slice_start = ptr.sub(index);
+        let index = unsafe { (*ptr).index };
+        let slice_start = unsafe { ptr.sub(index) };
 
         unsafe { slice_start.cast::<u8>().sub(slice_offset()) }.cast::<ArcSliceInnerMeta>()
     }
@@ -199,14 +203,16 @@ mod slot {
 
         // Increment the reference count of the arc to clone it.
         unsafe fn clone_waker(waker: *const ()) -> RawWaker {
-            meta_ref(waker.cast()).inc_strong();
+            unsafe { meta_ref(waker.cast()).inc_strong() };
             RawWaker::new(waker, VTABLE)
         }
 
         // We don't need ownership. Just wake_by_ref and drop the waker
         unsafe fn wake(waker: *const ()) {
-            wake_by_ref(waker);
-            drop_waker(waker);
+            unsafe {
+                wake_by_ref(waker);
+                drop_waker(waker);
+            }
         }
 
         // Find the `ArcSliceInnerMeta` and push the current index value into it,
@@ -214,20 +220,22 @@ mod slot {
         unsafe fn wake_by_ref(waker: *const ()) {
             let slot = waker.cast::<ArcSlotInner>();
 
-            let node = &*slot;
-            // node.woken.store(true, Ordering::Relaxed);
-            let prev = node.wake_lock.swap(true, Ordering::SeqCst);
+            let node = unsafe { &*slot };
+
+            let mut wake_lock = node.wake_lock.lock();
+            let prev = core::mem::replace(&mut *wake_lock, true);
 
             if !prev {
-                let meta = meta_ref(slot);
-                meta.queue.enqueue(NonNull::new_unchecked(slot.cast_mut()));
+                let meta = unsafe { meta_ref(slot) };
+                meta.queue
+                    .enqueue(unsafe { NonNull::new_unchecked(slot.cast_mut()) });
                 meta.waker.notify();
             }
         }
 
         // Decrement the reference count of the Arc on drop
         unsafe fn drop_waker(waker: *const ()) {
-            let meta = meta_ref(waker.cast());
+            let meta = unsafe { meta_ref(waker.cast()) };
             if meta.dec_strong() {
                 unsafe {
                     super::drop_inner(meta_raw(waker.cast::<ArcSlotInner>().cast_mut()), meta.len);
@@ -350,10 +358,10 @@ unsafe fn drop_inner(p: *mut ArcSliceInnerMeta, capacity: usize) {
     let layout = ArcSlice::layout(capacity);
 
     // SAFETY: the pointer points to an aligned and init instance of `ArcSliceInnerMeta`
-    drop_in_place(p);
+    unsafe { drop_in_place(p) };
 
     // SAFETY: this pointer has been allocated in the global allocator with the given layout
-    dealloc(p.cast(), layout);
+    unsafe { dealloc(p.cast(), layout) };
 }
 
 impl Drop for ArcSlice {
@@ -395,7 +403,7 @@ impl ArcSlice {
                     slice.add(i),
                     ArcSlotInner {
                         index: i,
-                        wake_lock: AtomicBool::new(false),
+                        wake_lock: SpinMutex::new(false),
                         links: Links::new(),
                     },
                 );
@@ -404,7 +412,7 @@ impl ArcSlice {
                 slice.add(cap),
                 ArcSlotInner {
                     index: cap,
-                    wake_lock: AtomicBool::new(false),
+                    wake_lock: SpinMutex::new(false),
                     links: Links::new_stub(),
                 },
             );
