@@ -147,6 +147,17 @@ impl<H, T> ThinArc<H, T> {
 
     /// Creates a `ThinArc` for a HeaderSlice using the given header struct and
     /// iterator to generate the slice.
+    pub fn from_iter<I, F>(items: I, f: F) -> Self
+    where
+        I: Iterator<Item = T> + ExactSizeIterator,
+        F: FnOnce(&mut [T]) -> H,
+    {
+        let len = items.len();
+        Arc::into_thin(Arc::from_iter(items, |i| HeaderWithLength::new(f(i), len)))
+    }
+
+    /// Creates a `ThinArc` for a HeaderSlice using the given header struct and
+    /// iterator to generate the slice.
     pub fn from_header_and_iter<I>(header: H, items: I) -> Self
     where
         I: Iterator<Item = T> + ExactSizeIterator,

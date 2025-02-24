@@ -25,9 +25,10 @@ pub struct HeaderSlice<H, T: ?Sized> {
 impl<H, T> Arc<HeaderSlice<H, [T]>> {
     /// Creates an Arc for a HeaderSlice using the given header struct and
     /// iterator to generate the slice. The resulting Arc will be fat.
-    pub fn from_header_and_iter<I>(header: H, mut items: I) -> Self
+    pub fn from_iter<I, F>(mut items: I, f: F) -> Self
     where
         I: Iterator<Item = T> + ExactSizeIterator,
+        F: FnOnce(&mut [T]) -> H,
     {
         assert_ne!(mem::size_of::<T>(), 0, "Need to think about ZST");
 
@@ -40,7 +41,6 @@ impl<H, T> Arc<HeaderSlice<H, [T]>> {
             //
             // Note that any panics here (i.e. from the iterator) are safe, since
             // we'll just leak the uninitialized memory.
-            ptr::write(&mut ((*inner.as_ptr()).data.header), header);
             let mut current = (*inner.as_ptr()).data.slice.as_mut_ptr();
             for _ in 0..num_items {
                 ptr::write(
@@ -55,6 +55,9 @@ impl<H, T> Arc<HeaderSlice<H, [T]>> {
                 items.next().is_none(),
                 "ExactSizeIterator under-reported length"
             );
+
+            let header = f(&mut (*inner.as_ptr()).data.slice);
+            ptr::write(&mut ((*inner.as_ptr()).data.header), header);
         }
 
         // Safety: ptr is valid & the inner structure is fully initialized
@@ -62,6 +65,15 @@ impl<H, T> Arc<HeaderSlice<H, [T]>> {
             p: inner,
             phantom: PhantomData,
         }
+    }
+
+    /// Creates an Arc for a HeaderSlice using the given header struct and
+    /// iterator to generate the slice. The resulting Arc will be fat.
+    pub fn from_header_and_iter<I>(header: H, items: I) -> Self
+    where
+        I: Iterator<Item = T> + ExactSizeIterator,
+    {
+        Self::from_iter(items, |_| header)
     }
 
     /// Creates an Arc for a HeaderSlice using the given header struct and
