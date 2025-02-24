@@ -138,7 +138,7 @@ mod tests {
     use super::*;
     use futures::{channel::oneshot, stream, StreamExt};
     use futures_test::task::noop_context;
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
     use tokio::task::JoinSet;
 
     #[test]
@@ -190,7 +190,7 @@ mod tests {
         for _ in 0..32 {
             js.spawn(async move {
                 let x = futures::stream::repeat_with(|| {
-                    let n = thread_rng().gen_range(1..=20);
+                    let n = rng().random_range(1..=20);
                     let fut = async move {
                         for _ in 0..4 {
                             tokio::time::sleep(n * dur).await;
