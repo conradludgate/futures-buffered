@@ -11,14 +11,11 @@
 //! * We can backtrack from an entry within the ThinArc, to the ThinArc itself.
 
 mod arc;
-mod arc_borrow;
 mod header;
-mod iterator_as_exact_size_iterator;
 mod thin_arc;
 mod thin_arc_list;
 
 pub use arc::*;
-pub use arc_borrow::*;
 pub use header::*;
 pub use thin_arc::*;
 pub use thin_arc_list::*;

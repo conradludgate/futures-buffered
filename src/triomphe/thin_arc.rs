@@ -92,59 +92,6 @@ impl<H, T> ThinArc<H, T> {
         f(&transient)
     }
 
-    /// Temporarily converts |self| into a bonafide Arc and exposes it to the
-    /// provided callback. The refcount is not modified.
-    #[inline]
-    pub fn with_arc_mut<F, U>(&mut self, f: F) -> U
-    where
-        F: FnOnce(&mut Arc<HeaderSliceWithLengthProtected<H, T>>) -> U,
-    {
-        // It is possible for the user to replace the Arc entirely here. If so, we need to update the ThinArc as well
-        // whenever this method exits. We do this with a drop guard to handle the panicking case
-        struct DropGuard<'a, H, T> {
-            transient: ManuallyDrop<Arc<HeaderSliceWithLengthProtected<H, T>>>,
-            this: &'a mut ThinArc<H, T>,
-        }
-
-        impl<'a, H, T> Drop for DropGuard<'a, H, T> {
-            fn drop(&mut self) {
-                // This guard is only dropped when the same debug_assert already succeeded
-                // or while panicking. This has the effect that, if the debug_assert fails, we abort!
-                // This should never fail, unless a user used `transmute` to violate the invariants of
-                // `HeaderSliceWithLengthProtected`.
-                // In this case, there is no sound fallback other than aborting.
-                debug_assert_eq!(
-                    self.transient.length(),
-                    self.transient.slice().len(),
-                    "Length needs to be correct for ThinArc to work"
-                );
-                // Safety: We're still in the realm of Protected types so this cast is safe
-                self.this.ptr = self.transient.p.cast();
-            }
-        }
-
-        // Synthesize transient Arc, which never touches the refcount of the ArcInner.
-        let transient = ManuallyDrop::new(unsafe { Arc::from_raw_inner(thin_to_thick(self)) });
-
-        let mut guard = DropGuard {
-            transient,
-            this: self,
-        };
-
-        // Expose the transient Arc to the callback, which may clone it if it wants
-        // and forward the result to the user
-        let ret = f(&mut guard.transient);
-
-        // deliberately checked both here AND in the `DropGuard`
-        debug_assert_eq!(
-            guard.transient.length(),
-            guard.transient.slice().len(),
-            "Length needs to be correct for ThinArc to work"
-        );
-
-        ret
-    }
-
     /// Creates a `ThinArc` for a HeaderSlice using the given header struct and
     /// iterator to generate the slice.
     pub fn from_iter<I, F>(items: I, f: F) -> Self
@@ -166,75 +113,11 @@ impl<H, T> ThinArc<H, T> {
         Arc::into_thin(Arc::from_header_and_iter(header, items))
     }
 
-    /// Creates a `ThinArc` for a HeaderSlice using the given header struct and
-    /// a slice to copy.
-    pub fn from_header_and_slice(header: H, items: &[T]) -> Self
-    where
-        T: Copy,
-    {
-        let header = HeaderWithLength::new(header, items.len());
-        Arc::into_thin(Arc::from_header_and_slice(header, items))
-    }
-
     /// Returns the address on the heap of the ThinArc itself -- not the T
     /// within it -- for memory reporting.
     #[inline]
     pub fn ptr(&self) -> *const c_void {
         self.ptr.cast().as_ptr()
-    }
-
-    /// Returns the address on the heap of the Arc itself -- not the T within it -- for memory
-    /// reporting.
-    #[inline]
-    pub fn heap_ptr(&self) -> *const c_void {
-        self.ptr()
-    }
-
-    /// # Safety
-    ///
-    /// Constructs an ThinArc from a raw pointer.
-    ///
-    /// The raw pointer must have been previously returned by a call to
-    /// ThinArc::into_raw.
-    ///
-    /// The user of from_raw has to make sure a specific value of T is only dropped once.
-    ///
-    /// This function is unsafe because improper use may lead to memory unsafety,
-    /// even if the returned ThinArc is never accessed.
-    #[inline]
-    pub unsafe fn from_raw(ptr: *const c_void) -> Self {
-        Self {
-            ptr: ptr::NonNull::new_unchecked(ptr as *mut c_void).cast(),
-            phantom: PhantomData,
-        }
-    }
-
-    /// Consume ThinArc and returned the wrapped pointer.
-    #[inline]
-    pub fn into_raw(self) -> *const c_void {
-        let this = ManuallyDrop::new(self);
-        this.ptr()
-    }
-
-    /// Provides a raw pointer to the data.
-    /// The counts are not affected in any way and the ThinArc is not consumed.
-    /// The pointer is valid for as long as there are strong counts in the ThinArc.
-    #[inline]
-    pub fn as_ptr(&self) -> *const c_void {
-        self.ptr()
-    }
-
-    /// The reference count of this `Arc`.
-    ///
-    /// The number does not include borrowed pointers,
-    /// or temporary `Arc` pointers created with functions like
-    /// [`ArcBorrow::with_arc`](crate::ArcBorrow::with_arc).
-    ///
-    /// The function is called `strong_count` to mirror `std::sync::Arc::strong_count`,
-    /// however `triomphe::Arc` does not support weak references.
-    #[inline]
-    pub fn strong_count(this: &Self) -> usize {
-        Self::with_arc(this, Arc::strong_count)
     }
 }
 
@@ -290,13 +173,6 @@ impl<H, T> Arc<HeaderSliceWithLengthUnchecked<H, T>> {
         );
         // Safety: invariant checked in assertion above
         unsafe { Self::into_thin_unchecked(a) }
-    }
-
-    /// Converts a `ThinArc` into an `Arc`. This consumes the `ThinArc`, so the refcount
-    /// is not modified.
-    #[inline]
-    pub fn from_thin(a: ThinArc<H, T>) -> Self {
-        Self::from_protected(Arc::<HeaderSliceWithLengthProtected<H, T>>::protected_from_thin(a))
     }
 
     /// Converts an `Arc` into a `ThinArc`. This consumes the `Arc`, so the refcount
@@ -475,130 +351,6 @@ mod tests {
         }
         assert_eq!(canary.load(Acquire), 1);
     }
-
-    #[test]
-    fn into_raw_and_from_raw() {
-        let mut canary = atomic::AtomicUsize::new(0);
-        let c = Canary(&mut canary as *mut atomic::AtomicUsize);
-        let v = vec![5, 6];
-        let header = HeaderWithLength::new(c, v.len());
-        {
-            type ThinArcCanary = ThinArc<Canary, u32>;
-            let x: ThinArcCanary = Arc::into_thin(Arc::from_header_and_iter(header, v.into_iter()));
-            let ptr = x.as_ptr();
-
-            assert_eq!(x.into_raw(), ptr);
-
-            let _x = unsafe { ThinArcCanary::from_raw(ptr) };
-        }
-        assert_eq!(canary.load(Acquire), 1);
-    }
-
-    #[test]
-    fn thin_eq_and_cmp() {
-        [
-            [("*", &b"AB"[..]), ("*", &b"ab"[..])],
-            [("*", &b"AB"[..]), ("*", &b"a"[..])],
-            [("*", &b"A"[..]), ("*", &b"ab"[..])],
-            [("A", &b"*"[..]), ("a", &b"*"[..])],
-            [("a", &b"*"[..]), ("A", &b"*"[..])],
-            [("AB", &b"*"[..]), ("a", &b"*"[..])],
-            [("A", &b"*"[..]), ("ab", &b"*"[..])],
-        ]
-        .iter()
-        .for_each(|[lt @ (lh, ls), rt @ (rh, rs)]| {
-            let l = ThinArc::from_header_and_slice(lh, ls);
-            let r = ThinArc::from_header_and_slice(rh, rs);
-
-            assert_eq!(l, l);
-            assert_eq!(r, r);
-
-            assert_ne!(l, r);
-            assert_ne!(r, l);
-
-            assert_eq!(l <= l, lt <= lt, "{lt:?} <= {lt:?}");
-            assert_eq!(l >= l, lt >= lt, "{lt:?} >= {lt:?}");
-
-            assert_eq!(l < l, lt < lt, "{lt:?} < {lt:?}");
-            assert_eq!(l > l, lt > lt, "{lt:?} > {lt:?}");
-
-            assert_eq!(r <= r, rt <= rt, "{rt:?} <= {rt:?}");
-            assert_eq!(r >= r, rt >= rt, "{rt:?} >= {rt:?}");
-
-            assert_eq!(r < r, rt < rt, "{rt:?} < {rt:?}");
-            assert_eq!(r > r, rt > rt, "{rt:?} > {rt:?}");
-
-            assert_eq!(l < r, lt < rt, "{lt:?} < {rt:?}");
-            assert_eq!(r > l, rt > lt, "{rt:?} > {lt:?}");
-        })
-    }
-
-    #[test]
-    fn thin_eq_and_partial_cmp() {
-        [
-            [(0.0, &[0.0, 0.0][..]), (1.0, &[0.0, 0.0][..])],
-            [(1.0, &[0.0, 0.0][..]), (0.0, &[0.0, 0.0][..])],
-            [(0.0, &[0.0][..]), (0.0, &[0.0, 0.0][..])],
-            [(0.0, &[0.0, 0.0][..]), (0.0, &[0.0][..])],
-            [(0.0, &[1.0, 2.0][..]), (0.0, &[10.0, 20.0][..])],
-        ]
-        .iter()
-        .for_each(|[lt @ (lh, ls), rt @ (rh, rs)]| {
-            let l = ThinArc::from_header_and_slice(lh, ls);
-            let r = ThinArc::from_header_and_slice(rh, rs);
-
-            assert_eq!(l, l);
-            assert_eq!(r, r);
-
-            assert_ne!(l, r);
-            assert_ne!(r, l);
-
-            assert_eq!(l <= l, lt <= lt, "{lt:?} <= {lt:?}");
-            assert_eq!(l >= l, lt >= lt, "{lt:?} >= {lt:?}");
-
-            assert_eq!(l < l, lt < lt, "{lt:?} < {lt:?}");
-            assert_eq!(l > l, lt > lt, "{lt:?} > {lt:?}");
-
-            assert_eq!(r <= r, rt <= rt, "{rt:?} <= {rt:?}");
-            assert_eq!(r >= r, rt >= rt, "{rt:?} >= {rt:?}");
-
-            assert_eq!(r < r, rt < rt, "{rt:?} < {rt:?}");
-            assert_eq!(r > r, rt > rt, "{rt:?} > {rt:?}");
-
-            assert_eq!(l < r, lt < rt, "{lt:?} < {rt:?}");
-            assert_eq!(r > l, rt > lt, "{rt:?} > {lt:?}");
-        })
-    }
-
-    // #[test]
-    // fn with_arc_mut() {
-    //     let mut arc: ThinArc<u8, u16> = ThinArc::from_header_and_slice(1u8, &[1, 2, 3]);
-    //     arc.with_arc_mut(|arc| Arc::get_mut(arc).unwrap().slice_mut().fill(2));
-    //     arc.with_arc_mut(|arc| assert!(Arc::get_unique(arc).is_some()));
-    //     arc.with_arc(|arc| assert!(Arc::is_unique(arc)));
-    //     // Using clone to that the layout generated in new_uninit_slice is compatible
-    //     // with ArcInner.
-    //     let arcs = [
-    //         arc.clone(),
-    //         arc.clone(),
-    //         arc.clone(),
-    //         arc.clone(),
-    //         arc.clone(),
-    //     ];
-    //     arc.with_arc(|arc| assert_eq!(6, Arc::count(arc)));
-
-    //     // If the layout is not compatible, then the data might be corrupted.
-    //     assert_eq!(arc.header.header, 1);
-    //     assert_eq!(&arc.slice, [2, 2, 2]);
-
-    //     // Drop the arcs and check the count and the content to
-    //     // make sure it isn't corrupted.
-    //     drop(arcs);
-    //     arc.with_arc_mut(|arc| assert!(Arc::get_unique(arc).is_some()));
-    //     arc.with_arc(|arc| assert!(Arc::is_unique(arc)));
-    //     assert_eq!(arc.header.header, 1);
-    //     assert_eq!(&arc.slice, [2, 2, 2]);
-    // }
 
     #[allow(dead_code)]
     const fn is_partial_ord<T: ?Sized + PartialOrd>() {}
