@@ -15,11 +15,13 @@ mod arc_borrow;
 mod header;
 mod iterator_as_exact_size_iterator;
 mod thin_arc;
+mod thin_arc_list;
 
 pub use arc::*;
 pub use arc_borrow::*;
 pub use header::*;
 pub use thin_arc::*;
+pub use thin_arc_list::*;
 
 // `no_std`-compatible abort by forcing a panic while already panicking.
 #[cold]

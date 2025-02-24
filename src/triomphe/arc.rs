@@ -598,100 +598,8 @@ impl<T: ?Sized> AsRef<T> for Arc<T> {
 #[cfg(test)]
 mod tests {
     use crate::triomphe::arc::Arc;
-    use alloc::borrow::ToOwned;
-    use alloc::string::String;
     use alloc::vec::Vec;
     use core::iter::FromIterator;
-    use core::mem::MaybeUninit;
-
-    // #[test]
-    // fn try_unwrap() {
-    //     let x = Arc::new(100usize);
-    //     let y = x.clone();
-
-    //     // The count should be two so `try_unwrap()` should fail
-    //     assert_eq!(Arc::count(&x), 2);
-    //     assert!(Arc::try_unwrap(x).is_err());
-
-    //     // Since `x` has now been dropped, the count should be 1
-    //     // and `try_unwrap()` should succeed
-    //     assert_eq!(Arc::count(&y), 1);
-    //     assert_eq!(Arc::try_unwrap(y), Ok(100));
-    // }
-
-    // #[test]
-    // #[allow(deprecated)]
-    // fn maybeuninit() {
-    //     let mut arc: Arc<MaybeUninit<_>> = Arc::new_uninit();
-    //     arc.write(999);
-
-    //     let arc = unsafe { arc.assume_init() };
-    //     assert_eq!(*arc, 999);
-    // }
-
-    // #[test]
-    // #[allow(deprecated)]
-    // #[should_panic = "`Arc` must be unique in order for this operation to be safe"]
-    // fn maybeuninit_ub_to_proceed() {
-    //     let mut uninit = Arc::new_uninit();
-    //     let clone = uninit.clone();
-
-    //     let x: &MaybeUninit<String> = &clone;
-
-    //     // This write invalidates `x` reference
-    //     uninit.write(String::from("nonononono"));
-
-    //     // Read invalidated reference to trigger UB
-    //     let _read = &*x;
-    // }
-
-    // #[test]
-    // #[allow(deprecated)]
-    // #[should_panic = "`Arc` must be unique in order for this operation to be safe"]
-    // fn maybeuninit_slice_ub_to_proceed() {
-    //     let mut uninit = Arc::new_uninit_slice(13);
-    //     let clone = uninit.clone();
-
-    //     let x: &[MaybeUninit<String>] = &clone;
-
-    //     // This write invalidates `x` reference
-    //     uninit.as_mut_slice()[0].write(String::from("nonononono"));
-
-    //     // Read invalidated reference to trigger UB
-    //     let _read = &*x;
-    // }
-
-    // #[test]
-    // fn maybeuninit_array() {
-    //     let mut arc: Arc<[MaybeUninit<_>]> = Arc::new_uninit_slice(5);
-    //     assert!(arc.is_unique());
-    //     #[allow(deprecated)]
-    //     for (uninit, index) in arc.as_mut_slice().iter_mut().zip(0..5) {
-    //         let ptr = uninit.as_mut_ptr();
-    //         unsafe { core::ptr::write(ptr, index) };
-    //     }
-
-    //     let arc = unsafe { arc.assume_init() };
-    //     assert!(arc.is_unique());
-    //     // Using clone to that the layout generated in new_uninit_slice is compatible
-    //     // with ArcInner.
-    //     let arcs = [
-    //         arc.clone(),
-    //         arc.clone(),
-    //         arc.clone(),
-    //         arc.clone(),
-    //         arc.clone(),
-    //     ];
-    //     assert_eq!(6, Arc::count(&arc));
-    //     // If the layout is not compatible, then the data might be corrupted.
-    //     assert_eq!(*arc, [0, 1, 2, 3, 4]);
-
-    //     // Drop the arcs and check the count and the content to
-    //     // make sure it isn't corrupted.
-    //     drop(arcs);
-    //     assert!(arc.is_unique());
-    //     assert_eq!(*arc, [0, 1, 2, 3, 4]);
-    // }
 
     #[test]
     fn roundtrip() {
@@ -701,26 +609,6 @@ mod tests {
             let _arc = Arc::from_raw(ptr);
         }
     }
-
-    // #[test]
-    // fn from_iterator_exact_size() {
-    //     let arc = Arc::from_iter(Vec::from_iter(["ololo".to_owned(), "trololo".to_owned()]));
-    //     assert_eq!(1, Arc::count(&arc));
-    //     assert_eq!(["ololo".to_owned(), "trololo".to_owned()], *arc);
-    // }
-
-    // #[test]
-    // fn from_iterator_unknown_size() {
-    //     let arc = Arc::from_iter(
-    //         Vec::from_iter(["ololo".to_owned(), "trololo".to_owned()])
-    //             .into_iter()
-    //             // Filter is opaque to iterators, so the resulting iterator
-    //             // will report lower bound of 0.
-    //             .filter(|_| true),
-    //     );
-    //     assert_eq!(1, Arc::count(&arc));
-    //     assert_eq!(["ololo".to_owned(), "trololo".to_owned()], *arc);
-    // }
 
     #[test]
     fn roundtrip_slice() {
