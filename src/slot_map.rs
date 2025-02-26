@@ -5,7 +5,7 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::{hint::unreachable_unchecked, pin::Pin};
 
-pub(crate) struct SlotMap<F> {
+pub(crate) struct PinSlotMap<F> {
     slots: Pin<Box<[Slot<F>]>>,
     free_head: usize,
     filled: usize,
@@ -18,7 +18,7 @@ enum Slot<F> {
     NextFree(usize),
 }
 
-impl<F> SlotMap<F> {
+impl<F> PinSlotMap<F> {
     /// Constructs a new, empty [`SlotMap`] with the given capacity
     pub fn new(capacity: usize) -> Self {
         let slots: Vec<_> = (1..=capacity).map(Slot::NextFree).collect();
@@ -121,7 +121,7 @@ impl<'a, F> Iterator for SlotMapIterMut<'a, F> {
     }
 }
 
-impl<F> FromIterator<F> for SlotMap<F> {
+impl<F> FromIterator<F> for PinSlotMap<F> {
     fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
         // store the futures in our task list
         let inner: Box<[Slot<F>]> = iter.into_iter().map(Slot::Occupied).collect();

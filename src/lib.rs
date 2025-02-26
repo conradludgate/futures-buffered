@@ -104,7 +104,7 @@ extern crate std;
 use core::future::Future;
 use futures_core::Stream;
 
-mod arc_slice;
+mod waker_list;
 mod buffered;
 mod futures_ordered;
 mod futures_ordered_bounded;

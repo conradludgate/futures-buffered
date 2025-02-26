@@ -5,7 +5,7 @@ use core::{
     task::{Context, Poll},
 };
 
-use crate::{arc_slice::ArcSlice, slot_map::SlotMap};
+use crate::{waker_list::ArcSlice, slot_map::PinSlotMap};
 use futures_core::{FusedStream, Stream};
 
 /// A set of futures which may complete in any order.
@@ -105,7 +105,7 @@ use futures_core::{FusedStream, Stream};
 /// # Ok(()) }
 /// ```
 pub struct FuturesUnorderedBounded<F> {
-    pub(crate) tasks: SlotMap<F>,
+    pub(crate) tasks: PinSlotMap<F>,
     pub(crate) shared: ArcSlice,
 }
 
@@ -119,7 +119,7 @@ impl<F> FuturesUnorderedBounded<F> {
     /// return [`Poll::Ready(None)`](Poll::Ready).
     pub fn new(cap: usize) -> Self {
         Self {
-            tasks: SlotMap::new(cap),
+            tasks: PinSlotMap::new(cap),
             shared: ArcSlice::new(cap),
         }
     }
@@ -207,12 +207,12 @@ impl<F> FuturesUnorderedBounded<F> {
             }
 
             match unsafe { self.shared.pop() } {
-                crate::arc_slice::ReadySlot::None => return Poll::Pending,
-                crate::arc_slice::ReadySlot::Inconsistent => {
+                crate::waker_list::ReadySlot::None => return Poll::Pending,
+                crate::waker_list::ReadySlot::Inconsistent => {
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
-                crate::arc_slice::ReadySlot::Ready((i, waker)) => {
+                crate::waker_list::ReadySlot::Ready((i, waker)) => {
                     if let Some(task) = self.tasks.get(i) {
                         let mut cx = Context::from_waker(&waker);
 
@@ -310,7 +310,7 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
     /// ```
     fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
         // store the futures in our task list
-        let tasks = SlotMap::from_iter(iter);
+        let tasks = PinSlotMap::from_iter(iter);
 
         // determine the actual capacity and create the shared state
         let cap = tasks.len();
