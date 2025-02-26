@@ -144,3 +144,53 @@ pub(crate) enum ReadySlot<T> {
     Inconsistent,
     None,
 }
+
+#[cfg(test)]
+mod tests {
+    use loom::thread;
+
+    use super::{ReadySlot, WakerList};
+
+    #[test]
+    #[cfg(not(miri))]
+    fn concurrent_push_and_wake() {
+        loom::model(|| {
+            let queue = WakerList::new(1);
+            unsafe { queue.push(0) };
+
+            unsafe {
+                let ReadySlot::Ready((_, waker)) = queue.pop() else {
+                    panic!()
+                };
+
+                let waker1 = (*waker).clone();
+                thread::spawn(move || waker1.wake());
+                queue.push(0);
+            };
+        })
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn concurrent_wakers() {
+        loom::model(|| {
+            let queue = WakerList::new(2);
+            unsafe { queue.push(0) };
+            unsafe { queue.push(1) };
+
+            unsafe {
+                let ReadySlot::Ready((_, waker0)) = queue.pop() else {
+                    panic!()
+                };
+                let ReadySlot::Ready((_, waker1)) = queue.pop() else {
+                    panic!()
+                };
+
+                let waker0 = (*waker0).clone();
+                thread::spawn(move || waker0.wake());
+
+                waker1.wake_by_ref();
+            };
+        })
+    }
+}
