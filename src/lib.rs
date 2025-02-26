@@ -113,7 +113,7 @@ mod join_all;
 mod merge_bounded;
 mod merge_unbounded;
 mod slot_map;
-mod triomphe;
+// mod triomphe;
 mod try_buffered;
 mod try_join_all;
 mod waker_list;

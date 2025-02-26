@@ -12,7 +12,7 @@ use core::{
 use diatomic_waker::primitives::DiatomicWaker;
 use spin::mutex::SpinMutex;
 
-use crate::triomphe::{wake::ThinItemWake, ThinArcItem, ThinArcList, WithOffset};
+use triomphe::{wake::ThinItemWake, ThinArcItem, ThinArcList, WithOffset};
 
 pub(crate) struct WakerList {
     inner: ThinArcList<WakerHeader, WakerItem>,
@@ -30,7 +30,7 @@ impl WakerList {
             },
             wake_lock: SpinMutex::new(false),
         });
-        let inner = ThinArcList::from_iter(items, |items| {
+        let inner = ThinArcList::header_from_iter(items, |items| {
             let stub = &items[cap];
             WakerHeader {
                 waker: DiatomicWaker::new(),
@@ -88,42 +88,45 @@ impl WakerList {
 
 struct WakerHeader {
     waker: DiatomicWaker,
-    queue: MpscQueue<WithOffset<WakerItem>>,
+    queue: MpscQueue<WakerItemWrapper>,
 }
 
 unsafe impl Send for WakerHeader {}
 unsafe impl Sync for WakerHeader {}
 
 struct WakerItem {
-    links: Links<WithOffset<Self>>,
+    links: Links<WakerItemWrapper>,
     // if true, then this slot is already woken and queued for processing.
     // if false, then this slot is available to be queued.
     wake_lock: SpinMutex<bool>,
 }
 
+#[repr(transparent)]
+struct WakerItemWrapper(WithOffset<WakerItem>);
+
 // SAFETY:
 // 1. ArcSlotInner will be pinned in memory within the ArcSlice allocation
 // 2. The `Links` object enforces ArcSlotInner to be !Unpin
-unsafe impl Linked<Links<Self>> for WithOffset<WakerItem> {
+unsafe impl Linked<Links<Self>> for WakerItemWrapper {
     type Handle = NonNull<WithOffset<WakerItem>>;
 
     fn into_ptr(r: Self::Handle) -> NonNull<Self> {
-        r
+        r.cast()
     }
 
     unsafe fn from_ptr(ptr: NonNull<Self>) -> Self::Handle {
-        ptr
+        ptr.cast()
     }
 
     unsafe fn links(ptr: NonNull<Self>) -> NonNull<Links<Self>> {
-        let this = ptr.as_ptr();
+        let this = ptr.as_ptr().cast::<WithOffset<WakerItem>>();
         let links = unsafe { ptr::addr_of_mut!((*this).value.links) };
         unsafe { NonNull::new_unchecked(links) }
     }
 }
 
 impl ThinItemWake<WakerHeader> for WakerItem {
-    fn wake_by_ref(this: &crate::triomphe::ThinArcItem<WakerHeader, Self>) {
+    fn wake_by_ref(this: &triomphe::ThinArcItem<WakerHeader, Self>) {
         let mut wake_lock = this.wake_lock.lock();
         let prev = core::mem::replace(&mut *wake_lock, true);
 
@@ -135,17 +138,6 @@ impl ThinItemWake<WakerHeader> for WakerItem {
         }
     }
 }
-
-// const fn __assert_send_sync<T: Send + Sync>() {}
-// const _: () = {
-//     // SyncUnsafeCell :ferrisPlead:
-//     // __assert_send_sync::<ArcSliceInnerMeta>();
-//     __assert_send_sync::<ArcSlotInner>();
-
-//     // SAFETY: The contents of the ArcSlice are Send+Sync
-//     unsafe impl Send for ArcSlice {}
-//     unsafe impl Sync for ArcSlice {}
-// };
 
 pub(crate) enum ReadySlot<T> {
     Ready(T),
