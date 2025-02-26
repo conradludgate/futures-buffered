@@ -116,7 +116,12 @@ impl ArcSlice {
         let queue = unsafe { &*ptr::addr_of!((*self.ptr.as_ptr()).queue) };
         let slot = unsafe { self.slice_start().add(index) };
 
-        queue.enqueue(unsafe { NonNull::new_unchecked(slot) });
+        let mut wake_lock = unsafe { &*slot }.wake_lock.lock();
+        let prev = core::mem::replace(&mut *wake_lock, true);
+
+        if !prev {
+            queue.enqueue(unsafe { NonNull::new_unchecked(slot) });
+        }
     }
 
     /// Register the waker
