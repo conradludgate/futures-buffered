@@ -5,7 +5,7 @@ use core::{
     task::{Context, Poll},
 };
 
-use crate::{waker_list::ArcSlice, slot_map::PinSlotMap};
+use crate::{waker_list::WakerList, slot_map::PinSlotMap};
 use futures_core::{FusedStream, Stream};
 
 /// A set of futures which may complete in any order.
@@ -106,7 +106,7 @@ use futures_core::{FusedStream, Stream};
 /// ```
 pub struct FuturesUnorderedBounded<F> {
     pub(crate) tasks: PinSlotMap<F>,
-    pub(crate) shared: ArcSlice,
+    pub(crate) shared: WakerList,
 }
 
 impl<F> Unpin for FuturesUnorderedBounded<F> {}
@@ -120,7 +120,7 @@ impl<F> FuturesUnorderedBounded<F> {
     pub fn new(cap: usize) -> Self {
         Self {
             tasks: PinSlotMap::new(cap),
-            shared: ArcSlice::new(cap),
+            shared: WakerList::new(cap),
         }
     }
 
@@ -314,7 +314,7 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
 
         // determine the actual capacity and create the shared state
         let cap = tasks.len();
-        let shared = ArcSlice::new(cap);
+        let shared = WakerList::new(cap);
 
         for i in 0..cap {
             // safety: i is always within capacity

@@ -15,7 +15,7 @@ use core::{
 use diatomic_waker::primitives::DiatomicWaker;
 use spin::mutex::SpinMutex;
 
-/// [`ArcSlice`] is a fun optimisation. For `FuturesUnorderedBounded`, we have `n` slots for futures,
+/// [`WakerList`] is a fun optimisation. For `FuturesUnorderedBounded`, we have `n` slots for futures,
 /// and we create a separate context when polling each individual future to avoid having n^2 polling.
 ///
 /// Originally, we pre-allocated `n` `Arc<Wake>` types and stored those along side the future slots.
@@ -27,40 +27,40 @@ use spin::mutex::SpinMutex;
 ///
 /// ... unless we hack around a little bit!
 ///
-/// [`ArcSlice`] represents the shared state, as well as having a long tail of indices. The layout is as follows
+/// [`WakerList`] represents the shared state, as well as having a long tail of indices. The layout is as follows
 /// ```text
 /// [ strong_count | waker | head | tail | len | slot 0 | slot 1 | slot 2 | slot 3 | ... ]
 /// ```
 ///
-/// [`ArcSlot`] represents our [`RawWaker`]. It points to one of the numbers in the list.
+/// [`WakerItem`] represents our [`RawWaker`]. It points to one of the numbers in the list.
 /// Since the layouts of the internals are fixed (`repr(C)`) - we can count back from the index to find
 /// the shared data.
 ///
-/// For example, if we have an `ArcSlot` pointing at the number 2, we can count back to pointer 2 `usize`s + [`ArcSliceInnerMeta`] to find
-/// the start of the [`ArcSlice`], and then we can insert `2` into the list of futures to poll, finally calling `waker.wake()`.
+/// For example, if we have an `WakerItem` pointing at the number 2, we can count back to pointer 2 `usize`s + [`WakerHeader`] to find
+/// the start of the [`WakerList`], and then we can insert `2` into the list of futures to poll, finally calling `waker.wake()`.
 ///
 /// Each slot also forms part of a linked list.
-pub(crate) struct ArcSlice {
-    ptr: NonNull<ArcSliceInnerMeta>,
-    phantom: PhantomData<ArcSliceInner>,
+pub(crate) struct WakerList {
+    ptr: NonNull<WakerHeader>,
+    phantom: PhantomData<WakerListInner>,
 }
 
-// The physical representation of ArcSlice.
-// A `ThinBox<ArcSliceInner>`
+// The physical representation of WakerList.
+// A `ThinBox<WakerListInner>`
 #[repr(C)]
-pub(crate) struct ArcSliceInner {
-    meta: ArcSliceInnerMeta,
-    slice: [ArcSlotInner],
+pub(crate) struct WakerListInner {
+    meta: WakerHeader,
+    slice: [WakerItem],
 }
 
-pub(crate) struct ArcSliceInnerMeta {
+pub(crate) struct WakerHeader {
     strong: AtomicUsize,
     waker: DiatomicWaker,
     len: usize,
-    queue: MpscQueue<ArcSlotInner>,
+    queue: MpscQueue<WakerItem>,
 }
 
-pub(crate) struct ArcSlotInner {
+pub(crate) struct WakerItem {
     links: Links<Self>,
     // if true, then this slot is already woken and queued for processing.
     // if false, then this slot is available to be queued.
@@ -69,9 +69,9 @@ pub(crate) struct ArcSlotInner {
 }
 
 // SAFETY:
-// 1. ArcSlotInner will be pinned in memory within the ArcSlice allocation
-// 2. The `Links` object enforces ArcSlotInner to be !Unpin
-unsafe impl Linked<Links<Self>> for ArcSlotInner {
+// 1. WakerItemInner will be pinned in memory within the WakerList allocation
+// 2. The `Links` object enforces WakerItemInner to be !Unpin
+unsafe impl Linked<Links<Self>> for WakerItem {
     type Handle = NonNull<Self>;
 
     fn into_ptr(r: Self::Handle) -> NonNull<Self> {
@@ -92,19 +92,19 @@ unsafe impl Linked<Links<Self>> for ArcSlotInner {
 const fn __assert_send_sync<T: Send + Sync>() {}
 const _: () = {
     // SyncUnsafeCell :ferrisPlead:
-    // __assert_send_sync::<ArcSliceInnerMeta>();
-    __assert_send_sync::<ArcSlotInner>();
+    // __assert_send_sync::<WakerHeader>();
+    __assert_send_sync::<WakerItem>();
 
-    // SAFETY: The contents of the ArcSlice are Send+Sync
-    unsafe impl Send for ArcSlice {}
-    unsafe impl Sync for ArcSlice {}
+    // SAFETY: The contents of the WakerList are Send+Sync
+    unsafe impl Send for WakerList {}
+    unsafe impl Sync for WakerList {}
 };
 
-impl ArcSlice {
-    fn slice_start(&self) -> *mut ArcSlotInner {
+impl WakerList {
+    fn slice_start(&self) -> *mut WakerItem {
         unsafe {
             let ptr = self.ptr.as_ptr().cast::<u8>();
-            ptr.add(slice_offset()).cast::<ArcSlotInner>()
+            ptr.add(slice_offset()).cast::<WakerItem>()
         }
     }
 
@@ -180,29 +180,29 @@ mod slot {
         task::{RawWaker, RawWakerVTable, Waker},
     };
 
-    use super::{slice_offset, ArcSliceInnerMeta, ArcSlotInner};
+    use super::{slice_offset, WakerHeader, WakerItem};
 
-    /// Traverses back the [`ArcSlice`] to find the [`ArcSliceInnerMeta`] pointer
+    /// Traverses back the [`WakerList`] to find the [`WakerHeader`] pointer
     ///
     /// # Safety:
-    /// `ptr` must be from an `ArcSlot` originally
-    unsafe fn meta_raw(ptr: *mut ArcSlotInner) -> *mut ArcSliceInnerMeta {
+    /// `ptr` must be from an `WakerItem` originally
+    unsafe fn meta_raw(ptr: *mut WakerItem) -> *mut WakerHeader {
         let index = unsafe { (*ptr).index };
         let slice_start = unsafe { ptr.sub(index) };
 
-        unsafe { slice_start.cast::<u8>().sub(slice_offset()) }.cast::<ArcSliceInnerMeta>()
+        unsafe { slice_start.cast::<u8>().sub(slice_offset()) }.cast::<WakerHeader>()
     }
 
-    /// Traverses back the [`ArcSlice`] to find the [`ArcSliceInnerMeta`] pointer
+    /// Traverses back the [`WakerList`] to find the [`WakerHeader`] pointer
     ///
     /// # Safety:
-    /// * `ptr` must be from an `ArcSlot` originally
-    /// * The original `ArcSlot` must outlive `'a`
-    unsafe fn meta_ref<'a>(ptr: *const ArcSlotInner) -> &'a ArcSliceInnerMeta {
+    /// * `ptr` must be from an `WakerItem` originally
+    /// * The original `WakerItem` must outlive `'a`
+    unsafe fn meta_ref<'a>(ptr: *const WakerItem) -> &'a WakerHeader {
         unsafe { &*meta_raw(ptr.cast_mut()) }
     }
 
-    pub(super) fn waker(ptr: *const ArcSlotInner) -> ManuallyDrop<Waker> {
+    pub(super) fn waker(ptr: *const WakerItem) -> ManuallyDrop<Waker> {
         static VTABLE: &RawWakerVTable =
             &RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker);
 
@@ -220,10 +220,10 @@ mod slot {
             }
         }
 
-        // Find the `ArcSliceInnerMeta` and push the current index value into it,
+        // Find the `WakerHeader` and push the current index value into it,
         // then call the stored waker to trigger a poll
         unsafe fn wake_by_ref(waker: *const ()) {
-            let slot = waker.cast::<ArcSlotInner>();
+            let slot = waker.cast::<WakerItem>();
 
             let node = unsafe { &*slot };
 
@@ -243,7 +243,7 @@ mod slot {
             let meta = unsafe { meta_ref(waker.cast()) };
             if meta.dec_strong() {
                 unsafe {
-                    super::drop_inner(meta_raw(waker.cast::<ArcSlotInner>().cast_mut()), meta.len);
+                    super::drop_inner(meta_raw(waker.cast::<WakerItem>().cast_mut()), meta.len);
                 }
             }
         }
@@ -253,7 +253,7 @@ mod slot {
     }
 }
 
-impl ArcSliceInnerMeta {
+impl WakerHeader {
     fn inc_strong(&self) {
         // Using a relaxed ordering is alright here, as knowledge of the
         // original reference prevents other threads from erroneously deleting
@@ -351,25 +351,25 @@ fn slice_offset() -> usize {
         len_rounded_up.wrapping_sub(len)
     }
 
-    let layout = Layout::new::<ArcSliceInnerMeta>();
-    layout.size() + padding_needed_for(&layout, core::mem::align_of::<ArcSlotInner>())
+    let layout = Layout::new::<WakerHeader>();
+    layout.size() + padding_needed_for(&layout, core::mem::align_of::<WakerItem>())
 }
 
-/// Drops the internals of the [`ArcSlice`].
+/// Drops the internals of the [`WakerList`].
 ///
 /// # Safety:
-/// The pointer must point to a currently allocated [`ArcSlice`].
-unsafe fn drop_inner(p: *mut ArcSliceInnerMeta, capacity: usize) {
-    let layout = ArcSlice::layout(capacity);
+/// The pointer must point to a currently allocated [`WakerList`].
+unsafe fn drop_inner(p: *mut WakerHeader, capacity: usize) {
+    let layout = WakerList::layout(capacity);
 
-    // SAFETY: the pointer points to an aligned and init instance of `ArcSliceInnerMeta`
+    // SAFETY: the pointer points to an aligned and init instance of `WakerHeader`
     unsafe { drop_in_place(p) };
 
     // SAFETY: this pointer has been allocated in the global allocator with the given layout
     unsafe { dealloc(p.cast(), layout) };
 }
 
-impl Drop for ArcSlice {
+impl Drop for WakerList {
     fn drop(&mut self) {
         let meta = unsafe { &*self.ptr.as_ptr() };
         if meta.dec_strong() {
@@ -378,7 +378,7 @@ impl Drop for ArcSlice {
     }
 }
 
-impl ArcSlice {
+impl WakerList {
     /// Allocates an `ArcInner<T>` with sufficient space for
     /// a possibly-unsized inner value where the value has the layout provided.
     pub(crate) fn new(cap: usize) -> Self {
@@ -395,8 +395,8 @@ impl ArcSlice {
         }
 
         // meta should be the first item in the alloc
-        let meta = ptr.cast::<ArcSliceInnerMeta>();
-        let slice = unsafe { ptr.add(slice_offset()).cast::<ArcSlotInner>() };
+        let meta = ptr.cast::<WakerHeader>();
+        let slice = unsafe { ptr.add(slice_offset()).cast::<WakerItem>() };
 
         // SAFETY:
         // The inner pointer is allocated and aligned, they just need to be initialised
@@ -406,7 +406,7 @@ impl ArcSlice {
             for i in 0..cap {
                 ptr::write(
                     slice.add(i),
-                    ArcSlotInner {
+                    WakerItem {
                         index: i,
                         wake_lock: SpinMutex::new(false),
                         links: Links::new(),
@@ -415,7 +415,7 @@ impl ArcSlice {
             }
             ptr::write(
                 slice.add(cap),
-                ArcSlotInner {
+                WakerItem {
                     index: cap,
                     wake_lock: SpinMutex::new(false),
                     links: Links::new_stub(),
@@ -424,7 +424,7 @@ impl ArcSlice {
 
             ptr::write(
                 meta,
-                ArcSliceInnerMeta {
+                WakerHeader {
                     strong: AtomicUsize::new(1),
                     len: cap,
                     waker: DiatomicWaker::new(),
@@ -440,12 +440,12 @@ impl ArcSlice {
     }
 
     fn layout(cap: usize) -> Layout {
-        let padded = Layout::new::<ArcSlotInner>().pad_to_align();
+        let padded = Layout::new::<WakerItem>().pad_to_align();
         let alloc_size = padded.size().checked_mul(cap + 1).unwrap();
         let slice_layout =
-            Layout::from_size_align(alloc_size, Layout::new::<ArcSlotInner>().align()).unwrap();
+            Layout::from_size_align(alloc_size, Layout::new::<WakerItem>().align()).unwrap();
 
-        Layout::new::<ArcSliceInnerMeta>()
+        Layout::new::<WakerHeader>()
             .extend(slice_layout)
             .unwrap()
             .0
