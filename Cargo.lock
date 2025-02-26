@@ -1174,12 +1174,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
-name = "stable_deref_trait"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
-
-[[package]]
 name = "syn"
 version = "2.0.98"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1411,11 +1405,7 @@ dependencies = [
 [[package]]
 name = "triomphe"
 version = "0.1.15"
-source = "git+https://github.com/conradludgate/triomphe?branch=conrad/add-thin-arc-list#4e36e98f03663c6d1e6c2ef030cccad03217ac39"
-dependencies = [
- "serde",
- "stable_deref_trait",
-]
+source = "git+https://github.com/conradludgate/triomphe?branch=conrad/add-thin-arc-list#4ef1564a3d6c9ec3b50040b3be0311d576941d2b"
 
 [[package]]
 name = "try-lock"

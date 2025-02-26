@@ -12,7 +12,7 @@ use core::{
 use diatomic_waker::primitives::DiatomicWaker;
 use spin::mutex::SpinMutex;
 
-use triomphe::{wake::ThinItemWake, ThinArcItem, ThinArcList, WithOffset};
+use triomphe::{task::ThinItemWake, ThinArcItem, ThinArcList, WithOffset};
 
 pub(crate) struct WakerList {
     inner: ThinArcList<WakerHeader, WakerItem>,
