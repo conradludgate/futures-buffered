@@ -1,7 +1,6 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
-    mem::MaybeUninit,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -12,7 +11,7 @@ use crate::{FuturesUnorderedBounded, TryFuture};
 /// Future for the [`try_join_all`] function.
 pub struct TryJoinAll<F: TryFuture> {
     queue: FuturesUnorderedBounded<F>,
-    output: Box<[MaybeUninit<F::Ok>]>,
+    output: Vec<F::Ok>,
 }
 
 impl<F: TryFuture> Unpin for TryJoinAll<F> {}
@@ -57,13 +56,9 @@ where
     let queue = FuturesUnorderedBounded::from_iter(iter);
 
     // create the output buffer
-    let mut output = Vec::with_capacity(queue.capacity());
-    output.resize_with(queue.capacity(), MaybeUninit::uninit);
+    let output = Vec::with_capacity(queue.capacity());
 
-    TryJoinAll {
-        queue,
-        output: output.into_boxed_slice(),
-    }
+    TryJoinAll { queue, output }
 }
 
 impl<F: TryFuture> Future for TryJoinAll<F> {
@@ -73,7 +68,7 @@ impl<F: TryFuture> Future for TryJoinAll<F> {
         loop {
             match self.as_mut().queue.poll_inner(cx) {
                 Poll::Ready(Some((i, Ok(t)))) => {
-                    self.output[i].write(t);
+                    self.output.spare_capacity_mut()[i].write(t);
                 }
                 Poll::Ready(Some((_, Err(e)))) => {
                     break Poll::Ready(Err(e));
@@ -82,17 +77,12 @@ impl<F: TryFuture> Future for TryJoinAll<F> {
                     // SAFETY: for Ready(None) to be returned, we know that every future in the queue
                     // must be consumed. Since we have a 1:1 mapping in the queue to our output, we
                     // know that every output entry is init.
-                    let boxed = unsafe {
-                        // take the boxed slice
-                        let boxed =
-                            core::mem::replace(&mut self.output, Vec::new().into_boxed_slice());
-
-                        // Box::assume_init
-                        let raw = Box::into_raw(boxed);
-                        Box::from_raw(raw as *mut [F::Ok])
+                    unsafe {
+                        let cap = self.queue.capacity();
+                        self.as_mut().output.set_len(cap);
                     };
 
-                    break Poll::Ready(Ok(boxed.into_vec()));
+                    break Poll::Ready(Ok(core::mem::take(&mut self.output)));
                 }
                 Poll::Pending => break Poll::Pending,
             }

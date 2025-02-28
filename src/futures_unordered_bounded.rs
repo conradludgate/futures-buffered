@@ -5,7 +5,7 @@ use core::{
     task::{Context, Poll},
 };
 
-use crate::{waker_list::WakerList, slot_map::PinSlotMap};
+use crate::{slot_map::PinSlotMap, waker_list::WakerList};
 use futures_core::{FusedStream, Stream};
 
 /// A set of futures which may complete in any order.
@@ -156,10 +156,8 @@ impl<F> FuturesUnorderedBounded<F> {
     #[inline]
     pub(crate) fn try_push_with<T>(&mut self, t: T, f: impl FnMut(T) -> F) -> Result<(), T> {
         let i = self.tasks.insert_with(t, f)?;
-        // safety: i is always within capacity
-        unsafe {
-            self.shared.push(i);
-        }
+        self.shared.task_is_ready(i);
+
         Ok(())
     }
 
@@ -206,7 +204,7 @@ impl<F> FuturesUnorderedBounded<F> {
                 return Poll::Pending;
             }
 
-            match unsafe { self.shared.pop() } {
+            match self.shared.next_ready_task() {
                 crate::waker_list::ReadySlot::None => return Poll::Pending,
                 crate::waker_list::ReadySlot::Inconsistent => {
                     cx.waker().wake_by_ref();
@@ -317,10 +315,7 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
         let shared = WakerList::new(cap);
 
         for i in 0..cap {
-            // safety: i is always within capacity
-            unsafe {
-                shared.push(i);
-            }
+            shared.task_is_ready(i);
         }
 
         // create the queue

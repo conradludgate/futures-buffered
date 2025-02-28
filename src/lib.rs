@@ -94,6 +94,7 @@
 //! # Ok(()) }
 //! ```
 #![no_std]
+#![warn(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 extern crate alloc;
 
@@ -104,7 +105,6 @@ extern crate std;
 use core::future::Future;
 use futures_core::Stream;
 
-mod waker_list;
 mod buffered;
 mod futures_ordered;
 mod futures_ordered_bounded;
@@ -114,8 +114,10 @@ mod join_all;
 mod merge_bounded;
 mod merge_unbounded;
 mod slot_map;
+// mod triomphe;
 mod try_buffered;
 mod try_join_all;
+mod waker_list;
 
 pub use buffered::{BufferUnordered, BufferedOrdered, BufferedStreamExt};
 pub use futures_ordered::FuturesOrdered;
