@@ -5,14 +5,16 @@ use cordyceps::{
     Linked, MpscQueue,
 };
 use core::{
-    mem::ManuallyDrop,
     ptr::{self, NonNull},
     task::Waker,
 };
 use diatomic_waker::primitives::DiatomicWaker;
 use spin::mutex::SpinMutex;
 
-use triomphe::{task::ThinItemWake, ThinArcItem, ThinArcList, WithOffset};
+use triomphe::{
+    task::{ThinItemWake, WakerRef},
+    ThinArcItem, ThinArcList, WithOffset,
+};
 
 pub(crate) struct WakerList {
     inner: ThinArcList<WakerHeader, WakerItem>,
@@ -66,18 +68,14 @@ impl WakerList {
     ///
     /// Note that this is unsafe as it required mutual exclusion (only one
     /// thread can call this) to be guaranteed elsewhere.
-    pub(crate) unsafe fn pop(&self) -> ReadySlot<(usize, ManuallyDrop<Waker>)> {
+    pub(crate) unsafe fn pop(&self) -> ReadySlot<(usize, WakerRef)> {
         match unsafe { self.inner.header().queue.try_dequeue_unchecked() } {
             Ok(slot) => {
-                let mut slot = unsafe { ThinArcItem::<WakerHeader, WakerItem>::from_raw_ref(slot) };
-                let index = slot.index();
+                let item = unsafe { ThinArcItem::<WakerHeader, WakerItem>::from_raw_ref(slot) };
+                *item.wake_lock.lock() = false;
 
-                *slot.wake_lock.lock() = false;
-
-                let waker =
-                    unsafe { ManuallyDrop::new(Waker::from(ManuallyDrop::take(&mut slot))) };
-
-                ReadySlot::Ready((index, waker))
+                let index = item.with_arc(|a| a.index());
+                ReadySlot::Ready((index, WakerRef::from(item)))
             }
             Err(TryDequeueError::Inconsistent) => ReadySlot::Inconsistent,
             Err(TryDequeueError::Empty) => ReadySlot::None,

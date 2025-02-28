@@ -1432,7 +1432,7 @@ dependencies = [
 [[package]]
 name = "triomphe"
 version = "0.1.15"
-source = "git+https://github.com/conradludgate/triomphe?branch=conrad/add-thin-arc-list#4ef1564a3d6c9ec3b50040b3be0311d576941d2b"
+source = "git+https://github.com/conradludgate/triomphe?branch=conrad/add-thin-arc-list#30df5a97a3b63f9e84e2d724fe71faeef991b2e6"
 
 [[package]]
 name = "try-lock"
