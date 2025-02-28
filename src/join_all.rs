@@ -1,18 +1,31 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
-    mem::MaybeUninit,
     pin::Pin,
-    task::{Context, Poll},
+    task::{ready, Context, Poll},
 };
 
-use crate::FuturesUnorderedBounded;
+use crate::{try_join_all, TryJoinAll};
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 /// Future for the [`join_all`] function.
 pub struct JoinAll<F: Future> {
-    queue: FuturesUnorderedBounded<F>,
-    output: Box<[MaybeUninit<F::Output>]>,
+    inner: TryJoinAll<Infallible<F>>,
+}
+
+pin_project_lite::pin_project! {
+    #[repr(transparent)]
+    struct Infallible<F> {
+        #[pin] inner: F,
+    }
+}
+
+impl<F: Future> Future for Infallible<F> {
+    type Output = Result<F::Output, core::convert::Infallible>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.project().inner.poll(cx).map(Ok)
+    }
 }
 
 impl<F: Future> Unpin for JoinAll<F> {}
@@ -72,46 +85,17 @@ where
     I: IntoIterator,
     <I as IntoIterator>::Item: Future,
 {
-    // create the queue
-    let queue = FuturesUnorderedBounded::from_iter(iter);
-
-    // create the output buffer
-    let mut output = Vec::with_capacity(queue.capacity());
-    output.resize_with(queue.capacity(), MaybeUninit::uninit);
-
-    JoinAll {
-        queue,
-        output: output.into_boxed_slice(),
-    }
+    let inner = try_join_all(iter.into_iter().map(|inner| Infallible { inner }));
+    JoinAll { inner }
 }
 
 impl<F: Future> Future for JoinAll<F> {
     type Output = Vec<F::Output>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        loop {
-            match self.as_mut().queue.poll_inner(cx) {
-                Poll::Ready(Some((i, x))) => {
-                    self.output[i].write(x);
-                }
-                Poll::Ready(None) => {
-                    // SAFETY: for Ready(None) to be returned, we know that every future in the queue
-                    // must be consumed. Since we have a 1:1 mapping in the queue to our output, we
-                    // know that every output entry is init.
-                    let boxed = unsafe {
-                        // take the boxed slice
-                        let boxed =
-                            core::mem::replace(&mut self.output, Vec::new().into_boxed_slice());
-
-                        // Box::assume_init
-                        let raw = Box::into_raw(boxed);
-                        Box::from_raw(raw as *mut [F::Output])
-                    };
-
-                    break Poll::Ready(boxed.into_vec());
-                }
-                Poll::Pending => break Poll::Pending,
-            }
+        match ready!(Pin::new(&mut self.as_mut().inner).poll(cx)) {
+            Ok(vec) => Poll::Ready(vec),
+            Err(x) => match x {},
         }
     }
 }
