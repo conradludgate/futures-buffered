@@ -10,7 +10,7 @@ use crate::{futures_unordered::MIN_CAPACITY, FuturesUnorderedBounded, MergeBound
 
 /// A combined stream that releases values in any order that they come.
 ///
-/// This differs from [`crate::Merge`] in that [`MergeUnbounded`] does not have a fixed capacity
+/// This differs from [`crate::MergeBounded`] in that [`MergeUnbounded`] does not have a fixed capacity
 /// but instead grows on demand. It uses [`crate::FuturesUnordered`] under the hood.
 ///
 /// # Example
