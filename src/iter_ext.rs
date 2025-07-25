@@ -102,7 +102,9 @@ pub trait IterExt: IntoIterator {
     /// use futures_buffered::IterExt;
     /// use tokio::time::{sleep, Duration};
     ///
-    /// # #[tokio::main] async fn main() {
+    /// # #[cfg(miri)] fn main() {}
+    /// # #[cfg(not(miri))] #[tokio::main]
+    /// # async fn main() {
     /// let res: Vec<_> = [3, 2, 1]
     ///     .map(|x| async move {
     ///         sleep(Duration::from_millis(x * 10)).await;
@@ -149,7 +151,9 @@ pub trait IterExt: IntoIterator {
     /// use futures_buffered::IterExt;
     /// use tokio::time::{sleep, Duration};
     ///
-    /// # #[tokio::main] async fn main() {
+    /// # #[cfg(miri)] fn main() {}
+    /// # #[cfg(not(miri))] #[tokio::main]
+    /// # async fn main() {
     /// let res: Vec<_> = [3, 2, 1]
     ///     .map(|x| async move {
     ///         sleep(Duration::from_millis(x * 10)).await;
@@ -195,6 +199,7 @@ mod tests {
 
     use super::IterExt;
 
+    #[cfg(not(miri))]
     #[tokio::test]
     async fn smoke() {
         let to_future = |x: u64| async move {
