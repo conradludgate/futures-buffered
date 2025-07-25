@@ -20,6 +20,7 @@ pin-project-lite = "0.2"
 diatomic-waker = "0.2.0"
 cordyceps = "0.3.2"
 spin = { version = "0.9.8", default-features = false, features = ["spin_mutex"] }
+triomphe = { version = "0.1.15", git = "https://github.com/conradludgate/triomphe", branch = "conrad/add-thin-arc-list", default-features = false }
 
 [dev-dependencies]
 futures = "0.3.31"
@@ -32,6 +33,8 @@ reqwest = "0.12.4"
 rand = "0.9.0"
 
 divan = "0.1.14"
+
+loom = "0.7.2"
 
 [[bench]]
 name = "batch"

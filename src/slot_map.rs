@@ -43,6 +43,7 @@ impl<F> PinSlotMap<F> {
 
         let Slot::NextFree(next_free) = *slot else {
             debug_assert!(false, "slotmap free_head pointed to a not free entry");
+            // Safety: The free list will always point to a free entry
             unsafe { unreachable_unchecked() }
         };
 

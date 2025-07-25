@@ -94,6 +94,7 @@
 //! # Ok(()) }
 //! ```
 #![no_std]
+#![warn(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 extern crate alloc;
 
@@ -114,6 +115,7 @@ mod join_all;
 mod merge_bounded;
 mod merge_unbounded;
 mod slot_map;
+// mod triomphe;
 mod try_buffered;
 mod try_join_all;
 mod waker_list;
