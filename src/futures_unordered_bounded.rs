@@ -5,7 +5,7 @@ use core::{
     task::{Context, Poll},
 };
 
-use crate::{waker_list::WakerList, slot_map::PinSlotMap};
+use crate::{slot_map::PinSlotMap, waker_list::WakerList};
 use futures_core::{FusedStream, Stream};
 
 /// A set of futures which may complete in any order.
