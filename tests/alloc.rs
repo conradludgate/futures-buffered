@@ -51,10 +51,10 @@ impl TrackingAllocator {
             .load(std::sync::atomic::Ordering::Relaxed);
         let alloc = self.alloc.load(std::sync::atomic::Ordering::Relaxed);
         let dealloc = self.dealloc.load(std::sync::atomic::Ordering::Relaxed);
-        println!("count1:   {:?}", alloc_count);
-        println!("count2:   {:?}", dealloc_count);
-        println!("alloc:    {:?}", alloc);
-        println!("dealloc:  {:?}", dealloc);
+        println!("count1:   {alloc_count:?}");
+        println!("count2:   {dealloc_count:?}");
+        println!("alloc:    {alloc:?}");
+        println!("dealloc:  {dealloc:?}");
         self.reset();
     }
 }
