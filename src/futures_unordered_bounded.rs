@@ -201,10 +201,14 @@ impl<F> FuturesUnorderedBounded<F> {
         loop {
             count += 1;
             // if we are in a pending only loop - let's break out.
+            // we do this even with tokio-coop in case of unconstrained tasks, or non-tokio runtimes.
             if count > MAX {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
+
+            #[cfg(feature = "tokio-coop")]
+            let coop = core::task::ready!(tokio::task::coop::poll_proceed(cx));
 
             match unsafe { self.shared.pop() } {
                 crate::waker_list::ReadySlot::None => return Poll::Pending,
@@ -213,6 +217,9 @@ impl<F> FuturesUnorderedBounded<F> {
                     return Poll::Pending;
                 }
                 crate::waker_list::ReadySlot::Ready((i, waker)) => {
+                    #[cfg(feature = "tokio-coop")]
+                    coop.made_progress();
+
                     if let Some(task) = self.tasks.get(i) {
                         let mut cx = Context::from_waker(&waker);
 
