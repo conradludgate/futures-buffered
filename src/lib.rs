@@ -93,6 +93,14 @@
 //! }
 //! # Ok(()) }
 //! ```
+//!
+//! # Cooperative Scheduling
+//!
+//! The functionality provided by this crate are technically their own async schedulers. If you are using this functionality within another
+//! async scheduler, you might not cooperate effectively and might starve other tasks in your scheduler.
+//!
+//! This crate makes sure it doesn't get stuck forever by forcing a yield periodically,
+//! but if you're using Tokio you will get better scheduling behaviour if you enable the `tokio-coop` feature.
 #![no_std]
 
 extern crate alloc;
