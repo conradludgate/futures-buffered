@@ -1,10 +1,11 @@
 //! Owns initialized outputs until they are dropped or transferred to the result.
 use alloc::{boxed::Box, vec::Vec};
-use core::mem::MaybeUninit;
+use core::mem::{needs_drop, MaybeUninit};
 use fixedbitset::FixedBitSet;
 
 pub(crate) struct JoinOutput<T> {
     values: Box<[MaybeUninit<T>]>,
+    // Empty in release builds when T has no drop glue.
     initialized: FixedBitSet,
 }
 
@@ -14,7 +15,11 @@ impl<T> JoinOutput<T> {
         values.resize_with(len, MaybeUninit::uninit);
         Self {
             values: values.into_boxed_slice(),
-            initialized: FixedBitSet::with_capacity(len),
+            initialized: if cfg!(debug_assertions) || needs_drop::<T>() {
+                FixedBitSet::with_capacity(len)
+            } else {
+                FixedBitSet::new()
+            },
         }
     }
 
@@ -24,7 +29,9 @@ impl<T> JoinOutput<T> {
             "output already initialized"
         );
         self.values[index].write(value);
-        self.initialized.insert(index);
+        if cfg!(debug_assertions) || needs_drop::<T>() {
+            self.initialized.insert(index);
+        }
     }
 
     /// Transfers the original allocation into the result vector.
@@ -48,7 +55,7 @@ impl<T> JoinOutput<T> {
 
 impl<T> Drop for JoinOutput<T> {
     fn drop(&mut self) {
-        if self.values.is_empty() {
+        if !needs_drop::<T>() || self.values.is_empty() {
             return;
         }
         struct Guard<'a, T> {
@@ -93,6 +100,24 @@ mod tests {
         assert_eq!(unsafe { output.take_vec() }, [10, 20]);
         // SAFETY: the allocation has already been taken.
         assert!(unsafe { output.take_vec() }.is_empty());
+    }
+
+    #[test]
+    fn zero_sized_outputs_with_drop_are_cleaned_up() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct Value;
+        impl Drop for Value {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let mut output = JoinOutput::new(65);
+        for i in (0..65).step_by(2) {
+            output.write(i, Value);
+        }
+        drop(output);
+        assert_eq!(DROPS.load(Ordering::Relaxed), 33);
     }
 
     #[test]

@@ -34,14 +34,50 @@ unsafe impl GlobalAlloc for Allocator {
         unsafe { System.dealloc(ptr, layout) }
     }
 }
+fn count_allocations<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let result = f();
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    (result, allocations)
+}
 fn assert_poll_does_not_allocate(future: impl Future) {
     let mut future = pin!(future);
     let mut cx = noop_context();
-    ALLOCATIONS.with(|count| count.set(Some(0)));
-    let result = future.as_mut().poll(&mut cx);
-    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    let (result, allocations) = count_allocations(|| future.as_mut().poll(&mut cx));
     assert!(result.is_ready());
     assert_eq!(allocations, 0, "poll allocated or reallocated");
+}
+
+#[test]
+fn bitsets_are_allocated_for_drop_or_debug_checks() {
+    struct Droppable(usize);
+    impl Drop for Droppable {
+        fn drop(&mut self) {
+            let _ = self.0;
+        }
+    }
+    let no_drop_allocations = if cfg!(debug_assertions) { 4 } else { 3 };
+    for n in [1_usize, 16, 65, 256, 1025] {
+        let (joined, allocations) =
+            count_allocations(|| futures_buffered::join_all((0..n).map(ready)));
+        assert_eq!(allocations, no_drop_allocations);
+        assert_poll_does_not_allocate(joined);
+        let (joined, allocations) =
+            count_allocations(|| futures_buffered::join_all((0..n).map(|i| ready(Droppable(i)))));
+        assert_eq!(allocations, 4);
+        assert_poll_does_not_allocate(joined);
+
+        let (joined, allocations) = count_allocations(|| {
+            futures_buffered::try_join_all((0..n).map(|i| ready(Ok::<_, ()>(i))))
+        });
+        assert_eq!(allocations, no_drop_allocations);
+        assert_poll_does_not_allocate(joined);
+        let (joined, allocations) = count_allocations(|| {
+            futures_buffered::try_join_all((0..n).map(|i| ready(Ok::<_, ()>(Droppable(i)))))
+        });
+        assert_eq!(allocations, 4);
+        assert_poll_does_not_allocate(joined);
+    }
 }
 #[test]
 fn polling_does_not_allocate() {
