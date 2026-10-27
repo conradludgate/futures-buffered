@@ -1,19 +1,17 @@
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
-    mem::MaybeUninit,
     pin::Pin,
     task::{Context, Poll},
 };
 
-use crate::FuturesUnorderedBounded;
+use crate::{join_output::JoinOutput, FuturesUnorderedBounded};
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 /// Future for the [`join_all`] function.
 pub struct JoinAll<F: Future> {
     queue: FuturesUnorderedBounded<F>,
-    output: Box<[MaybeUninit<F::Output>]>,
-    initialized: Box<[usize]>,
+    output: JoinOutput<F::Output>,
 }
 
 impl<F: Future> Unpin for JoinAll<F> {}
@@ -77,15 +75,9 @@ where
     let queue = FuturesUnorderedBounded::from_iter(iter);
 
     // create the output buffer
-    let mut output = Vec::with_capacity(queue.capacity());
-    output.resize_with(queue.capacity(), MaybeUninit::uninit);
-    let initialized = vec![0; queue.capacity().div_ceil(usize::BITS as usize)].into_boxed_slice();
+    let output = JoinOutput::new(queue.capacity());
 
-    JoinAll {
-        queue,
-        output: output.into_boxed_slice(),
-        initialized,
-    }
+    JoinAll { queue, output }
 }
 
 impl<F: Future> Future for JoinAll<F> {
@@ -95,72 +87,16 @@ impl<F: Future> Future for JoinAll<F> {
         loop {
             match self.as_mut().queue.poll_inner(cx) {
                 Poll::Ready(Some((i, x))) => {
-                    self.output[i].write(x);
-                    self.initialized[i / usize::BITS as usize] |= 1 << (i % usize::BITS as usize);
+                    self.output.write(i, x);
                 }
                 Poll::Ready(None) => {
-                    // SAFETY: for Ready(None) to be returned, we know that every future in the queue
-                    // must be consumed. Since we have a 1:1 mapping in the queue to our output, we
-                    // know that every output entry is init.
-                    let boxed = unsafe {
-                        // take the boxed slice
-                        let boxed =
-                            core::mem::replace(&mut self.output, Vec::new().into_boxed_slice());
-
-                        // Box::assume_init
-                        let raw = Box::into_raw(boxed);
-                        Box::from_raw(raw as *mut [F::Output])
-                    };
-
-                    break Poll::Ready(boxed.into_vec());
+                    // SAFETY: every future has completed and written its output slot.
+                    break Poll::Ready(unsafe { self.output.take_vec() });
                 }
                 Poll::Pending => break Poll::Pending,
             }
         }
     }
-}
-
-impl<F: Future> Drop for JoinAll<F> {
-    fn drop(&mut self) {
-        drop_outputs(&mut self.output, &mut self.initialized);
-    }
-}
-
-/// Drop only initialized outputs, continuing cleanup if one destructor panics.
-pub(super) fn drop_outputs<T>(output: &mut [MaybeUninit<T>], initialized: &mut [usize]) {
-    // Successful completion transfers the allocation and leaves an empty slice.
-    if output.is_empty() {
-        return;
-    }
-    struct Guard<'a, T> {
-        output: &'a mut [MaybeUninit<T>],
-        initialized: &'a mut [usize],
-    }
-    impl<T> Guard<'_, T> {
-        fn drop_remaining(&mut self) {
-            for (word_index, word) in self.initialized.iter_mut().enumerate() {
-                while *word != 0 {
-                    let bit = word.trailing_zeros() as usize;
-                    // Relinquish ownership before invoking a destructor that may panic.
-                    *word &= *word - 1;
-                    let index = word_index * usize::BITS as usize + bit;
-                    // SAFETY: a bit is set only after its output is initialized, and
-                    // cleared before dropping it. No value can be dropped twice.
-                    unsafe { self.output[index].assume_init_drop() };
-                }
-            }
-        }
-    }
-    impl<T> Drop for Guard<'_, T> {
-        fn drop(&mut self) {
-            self.drop_remaining();
-        }
-    }
-    let mut guard = Guard {
-        output,
-        initialized,
-    };
-    guard.drop_remaining();
 }
 
 #[cfg(test)]

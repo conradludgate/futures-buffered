@@ -19,6 +19,7 @@ default = []
 tokio-coop = ["dep:tokio"]
 
 [dependencies]
+fixedbitset = { version = "0.5.7", default-features = false }
 futures-core = { version = "0.3", default-features = false }
 pin-project-lite = "0.2"
 diatomic-waker = "0.2"

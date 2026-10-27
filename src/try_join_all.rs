@@ -1,19 +1,17 @@
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
-    mem::MaybeUninit,
     pin::Pin,
     task::{Context, Poll},
 };
 
-use crate::{FuturesUnorderedBounded, TryFuture};
+use crate::{join_output::JoinOutput, FuturesUnorderedBounded, TryFuture};
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 /// Future for the [`try_join_all`] function.
 pub struct TryJoinAll<F: TryFuture> {
     queue: FuturesUnorderedBounded<F>,
-    output: Box<[MaybeUninit<F::Ok>]>,
-    initialized: Box<[usize]>,
+    output: JoinOutput<F::Ok>,
     errored: bool,
 }
 
@@ -59,14 +57,11 @@ where
     let queue = FuturesUnorderedBounded::from_iter(iter);
 
     // create the output buffer
-    let mut output = Vec::with_capacity(queue.capacity());
-    output.resize_with(queue.capacity(), MaybeUninit::uninit);
-    let initialized = vec![0; queue.capacity().div_ceil(usize::BITS as usize)].into_boxed_slice();
+    let output = JoinOutput::new(queue.capacity());
 
     TryJoinAll {
         queue,
-        output: output.into_boxed_slice(),
-        initialized,
+        output,
         errored: false,
     }
 }
@@ -79,38 +74,20 @@ impl<F: TryFuture> Future for TryJoinAll<F> {
         loop {
             match self.as_mut().queue.poll_inner(cx) {
                 Poll::Ready(Some((i, Ok(t)))) => {
-                    self.output[i].write(t);
-                    self.initialized[i / usize::BITS as usize] |= 1 << (i % usize::BITS as usize);
+                    self.output.write(i, t);
                 }
                 Poll::Ready(Some((_, Err(e)))) => {
                     self.errored = true;
                     break Poll::Ready(Err(e));
                 }
                 Poll::Ready(None) => {
-                    // SAFETY: for Ready(None) to be returned, we know that every future in the queue
-                    // must be consumed. Since we have a 1:1 mapping in the queue to our output, we
-                    // know that every output entry is init.
-                    let boxed = unsafe {
-                        // take the boxed slice
-                        let boxed =
-                            core::mem::replace(&mut self.output, Vec::new().into_boxed_slice());
-
-                        // Box::assume_init
-                        let raw = Box::into_raw(boxed);
-                        Box::from_raw(raw as *mut [F::Ok])
-                    };
-
-                    break Poll::Ready(Ok(boxed.into_vec()));
+                    // SAFETY: every future completed successfully and wrote its slot.
+                    // The error flag prevents re-polling after an unsuccessful completion.
+                    break Poll::Ready(Ok(unsafe { self.output.take_vec() }));
                 }
                 Poll::Pending => break Poll::Pending,
             }
         }
-    }
-}
-
-impl<F: TryFuture> Drop for TryJoinAll<F> {
-    fn drop(&mut self) {
-        crate::join_all::drop_outputs(&mut self.output, &mut self.initialized);
     }
 }
 
