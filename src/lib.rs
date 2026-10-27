@@ -119,6 +119,7 @@ mod futures_unordered;
 mod futures_unordered_bounded;
 mod iter_ext;
 mod join_all;
+mod join_output;
 mod merge_bounded;
 mod merge_unbounded;
 mod slot_map;
