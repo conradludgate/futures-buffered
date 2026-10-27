@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     future::Future,
     mem::MaybeUninit,
@@ -13,6 +13,8 @@ use crate::{FuturesUnorderedBounded, TryFuture};
 pub struct TryJoinAll<F: TryFuture> {
     queue: FuturesUnorderedBounded<F>,
     output: Box<[MaybeUninit<F::Ok>]>,
+    initialized: Box<[usize]>,
+    errored: bool,
 }
 
 impl<F: TryFuture> Unpin for TryJoinAll<F> {}
@@ -59,10 +61,13 @@ where
     // create the output buffer
     let mut output = Vec::with_capacity(queue.capacity());
     output.resize_with(queue.capacity(), MaybeUninit::uninit);
+    let initialized = vec![0; queue.capacity().div_ceil(usize::BITS as usize)].into_boxed_slice();
 
     TryJoinAll {
         queue,
         output: output.into_boxed_slice(),
+        initialized,
+        errored: false,
     }
 }
 
@@ -70,12 +75,15 @@ impl<F: TryFuture> Future for TryJoinAll<F> {
     type Output = Result<Vec<F::Ok>, F::Err>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(!self.errored, "TryJoinAll polled after an error");
         loop {
             match self.as_mut().queue.poll_inner(cx) {
                 Poll::Ready(Some((i, Ok(t)))) => {
                     self.output[i].write(t);
+                    self.initialized[i / usize::BITS as usize] |= 1 << (i % usize::BITS as usize);
                 }
                 Poll::Ready(Some((_, Err(e)))) => {
+                    self.errored = true;
                     break Poll::Ready(Err(e));
                 }
                 Poll::Ready(None) => {
@@ -97,6 +105,12 @@ impl<F: TryFuture> Future for TryJoinAll<F> {
                 Poll::Pending => break Poll::Pending,
             }
         }
+    }
+}
+
+impl<F: TryFuture> Drop for TryJoinAll<F> {
+    fn drop(&mut self) {
+        crate::join_all::drop_outputs(&mut self.output, &mut self.initialized);
     }
 }
 
