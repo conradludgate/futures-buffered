@@ -90,7 +90,13 @@ impl<F: Future> Future for JoinAll<F> {
                     self.output.write(i, x);
                 }
                 Poll::Ready(None) => {
-                    // SAFETY: every future has completed and written its output slot.
+                    // SAFETY: FromIterator created one future per original
+                    // queue index, and this private queue is never refilled.
+                    // poll_inner's internal invariant makes None follow
+                    // one returned output per index. Each was passed to write,
+                    // whose invariant supplies a valid owned output there.
+                    // After a previous take_vec the output is empty instead,
+                    // which also satisfies take_vec's contract.
                     break Poll::Ready(unsafe { self.output.take_vec() });
                 }
                 Poll::Pending => break Poll::Pending,

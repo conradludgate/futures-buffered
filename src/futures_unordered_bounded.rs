@@ -236,6 +236,17 @@ impl<F> FuturesUnorderedBounded<F> {
 }
 
 impl<F: Future> FuturesUnorderedBounded<F> {
+    // Internal invariant used by JoinAll and TryJoinAll:
+    // A returned (index, output) belongs to an occupied slot in 0..capacity().
+    // That future has returned Ready and remove has completed before this
+    // method returns it. Without intervening insertion, an index cannot be
+    // returned twice. Ready(None) means no occupied slots remain.
+    //
+    // For a queue made by FromIterator and subsequently used only through this
+    // method, Ready(None) therefore follows exactly one returned output for
+    // every original index. A panic during polling or removal does not remove
+    // an unreported item from the count: remove decrements it only after drop
+    // succeeds, so unwinding cannot make this method report completion early.
     pub(crate) fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, F::Output)>> {
         match self.poll_inner_no_remove(cx, F::poll) {
             Poll::Ready(Some((i, x))) => {
@@ -265,7 +276,7 @@ impl<F: Future> Stream for FuturesUnorderedBounded<F> {
 }
 
 impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
-    /// Constructs a new, empty [`FuturesUnorderedBounded`] with a fixed capacity that is the length of the iterator.
+    /// Constructs a full [`FuturesUnorderedBounded`] from the iterator's futures.
     ///
     /// # Example
     ///
@@ -316,6 +327,11 @@ impl<F> FromIterator<F> for FuturesUnorderedBounded<F> {
     /// # Ok(()) }
     /// ```
     fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
+        // Internal invariant used by JoinAll and TryJoinAll: capacity is the
+        // actual number of yielded futures, not a size hint. Every index in
+        // 0..capacity() initially owns one future, with no vacant slots; each
+        // is initially scheduled for polling. These properties follow from
+        // PinSlotMap::from_iter's invariant and pushing each collected index.
         // store the futures in our task list
         let tasks = PinSlotMap::from_iter(iter);
 

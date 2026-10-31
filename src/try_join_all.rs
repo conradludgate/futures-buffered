@@ -81,8 +81,14 @@ impl<F: TryFuture> Future for TryJoinAll<F> {
                     break Poll::Ready(Err(e));
                 }
                 Poll::Ready(None) => {
-                    // SAFETY: every future completed successfully and wrote its slot.
-                    // The error flag prevents re-polling after an unsuccessful completion.
+                    // SAFETY: FromIterator populated every original queue
+                    // index and this private queue is never refilled. By
+                    // poll_inner's invariant, None follows one returned output
+                    // per index. An Err sets errored before returning and the
+                    // assertion above prevents subsequent conversion, so every
+                    // output on this path was Ok and passed to write. Its
+                    // invariant supplies a valid owned T in each slot, or the
+                    // buffer is empty after a previous successful take_vec.
                     break Poll::Ready(Ok(unsafe { self.output.take_vec() }));
                 }
                 Poll::Pending => break Poll::Pending,
