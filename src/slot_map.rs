@@ -54,7 +54,14 @@ impl<F> PinSlotMap<F> {
         Ok(key)
     }
 
-    /// Removes a key from the slot map
+    /// Removes a key from the slot map.
+    ///
+    /// # Safety-usable invariant
+    ///
+    /// An occupied slot becomes vacant and its count is decremented exactly
+    /// once on normal return. Absent/vacant keys do not change the count. Drop
+    /// runs before decrementing filled: a panic can overstate occupancy but
+    /// cannot make is_empty report completion for unremoved entries.
     pub fn remove(&mut self, key: usize) {
         let free_head = self.free_head;
         let Some(mut slot) = self.get_slot(key) else {
@@ -122,6 +129,11 @@ impl<'a, F> Iterator for SlotMapIterMut<'a, F> {
 }
 
 impl<F> FromIterator<F> for PinSlotMap<F> {
+    /// # Safety-usable invariant
+    ///
+    /// All slots in 0..capacity() are occupied and filled == capacity(). The
+    /// boxed slice length is the number of actual yielded values, independently
+    /// of any caller-controlled iterator size hint. No free index exists yet.
     fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
         // store the futures in our task list
         let inner: Box<[Slot<F>]> = iter.into_iter().map(Slot::Occupied).collect();

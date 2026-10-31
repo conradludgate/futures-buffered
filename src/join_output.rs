@@ -4,12 +4,25 @@ use core::mem::{needs_drop, MaybeUninit};
 use fixedbitset::FixedBitSet;
 
 pub(crate) struct JoinOutput<T> {
+    // Safety invariant: Until take_vec transfers ownership or Drop starts,
+    // each set bit in initialized identifies a valid, owned T in values at
+    // that index. No other owner may read or drop those values. When tracking
+    // is elided, values may still be uninitialized: needs_drop::<T>() == false
+    // just removes cleanup obligations, not take_vec's initialization contract.
+    // Once taken, values is empty and initialized may retain stale bits.
     values: Box<[MaybeUninit<T>]>,
-    // Empty in release builds when T has no drop glue.
+    // Safety invariant: With tracking enabled (debug assertions or T needs
+    // drop), its length equals the original values length and no bit outside
+    // that range is set. Otherwise this is empty. During Drop, Guard's remaining
+    // iterator, rather than the original bitmap, identifies values still owned.
     initialized: FixedBitSet,
 }
 
 impl<T> JoinOutput<T> {
+    /// # Safety-usable invariant
+    ///
+    /// Creates exactly len output slots, all uninitialized. Tracking, when
+    /// enabled, has the same length and no set bits.
     pub(crate) fn new(len: usize) -> Self {
         let mut values = Vec::with_capacity(len);
         values.resize_with(len, MaybeUninit::uninit);
@@ -23,12 +36,21 @@ impl<T> JoinOutput<T> {
         }
     }
 
+    /// # Safety-usable invariant
+    ///
+    /// On return, the bounds-checked index contains value, owned by this helper,
+    /// and its bit is set when tracking is enabled. Overwriting an occupied slot
+    /// in release can leak its previous value, but does not leave this slot
+    /// uninitialized. Join callers use each original queue index only once.
     pub(crate) fn write(&mut self, index: usize, value: T) {
         debug_assert!(
             !self.initialized.contains(index),
             "output already initialized"
         );
         self.values[index].write(value);
+        // The write completed before marking. The bounds check above implies
+        // index is also within initialized when tracking is enabled; inserting
+        // into its preallocated storage invokes no caller code.
         if cfg!(debug_assertions) || needs_drop::<T>() {
             self.initialized.insert(index);
         }
@@ -38,17 +60,28 @@ impl<T> JoinOutput<T> {
     ///
     /// # Safety
     ///
-    /// Every output slot must have been initialized by `write`, unless the
-    /// allocation has already been taken and `values` is empty.
+    /// The caller must ensure every current output slot contains a valid T
+    /// initialized by write, with ownership still held by this helper. This
+    /// applies even when release-mode tracking is elided. An empty buffer,
+    /// including one whose allocation was already taken, satisfies the contract.
+    ///
+    /// On return the vector owns those values and their storage; this helper's
+    /// values buffer is empty and will not drop or transfer them again.
     pub(crate) unsafe fn take_vec(&mut self) -> Vec<T> {
         debug_assert!(
             self.values.is_empty() || self.initialized.is_full(),
             "missing join output"
         );
         let values = core::mem::replace(&mut self.values, Vec::new().into_boxed_slice());
-        // SAFETY: the caller guarantees every slot is initialized, and
-        // MaybeUninit<T> has T's layout.
-        // Emptying self.values disarms Drop before transferring ownership.
+        // SAFETY: take_vec's caller supplies valid, exclusively owned T values.
+        // Box::into_raw supplies the original Box pointer and slice length;
+        // casting the slice pointer retains that length. MaybeUninit<T> has T's
+        // size/alignment, so the slice layout and allocation identity are
+        // unchanged. This also preserves Box's aligned, non-null pointer for
+        // empty/ZST slices, which need no allocated bytes. No callback runs
+        // between detaching this Box and reconstructing it once as Box<[T]>.
+        // self.values is already empty, disarming its drop/transfer path;
+        // ownership now passes through Box<[T]> to the returned Vec<T>.
         unsafe { Box::from_raw(Box::into_raw(values) as *mut [T]) }.into_vec()
     }
 }
@@ -59,15 +92,22 @@ impl<T> Drop for JoinOutput<T> {
             return;
         }
         struct Guard<'a, T> {
+            // Safety invariant: Every remaining initialized iterator index is
+            // in bounds and contains one valid T still owned by this guard.
             values: &'a mut [MaybeUninit<T>],
+            // Consumed indices are never yielded again, including after panic.
             initialized: fixedbitset::Ones<'a>,
         }
         impl<T> Guard<'_, T> {
             fn drop_remaining(&mut self) {
                 for index in self.initialized.by_ref() {
-                    // SAFETY: only initialized slots have set bits. The iterator
-                    // advances before invoking user code, so the guard resumes at
-                    // the next value if this destructor panics.
+                    // SAFETY: Guard's invariant supplies an in-bounds valid T
+                    // exclusively owned here, as assume_init_drop requires.
+                    // FixedBitSet::ones yields each set index once. next() has
+                    // advanced before user Drop runs, relinquishing this slot's
+                    // drop obligation even if it panics. Guard::drop therefore
+                    // resumes only with other live values; the surrounding
+                    // MaybeUninit slice never drops any T a second time.
                     unsafe { self.values[index].assume_init_drop() };
                 }
             }
@@ -78,6 +118,8 @@ impl<T> Drop for JoinOutput<T> {
             }
         }
         let mut guard = Guard {
+            // JoinOutput's tracked-slot invariant establishes Guard's invariant.
+            // Drop's early return excludes both elided tracking and taken data.
             values: &mut self.values,
             initialized: self.initialized.ones(),
         };
