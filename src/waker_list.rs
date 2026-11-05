@@ -234,6 +234,9 @@ mod slot {
                 let meta = unsafe { meta_ref(slot) };
                 meta.queue
                     .enqueue(unsafe { NonNull::new_unchecked(slot.cast_mut()) });
+                // Publish the queued slot before invoking caller-controlled
+                // code. A parent waker may synchronously consume this slot.
+                drop(wake_lock);
                 meta.waker.notify();
             }
         }
@@ -464,4 +467,58 @@ fn abort(s: &str) -> ! {
 
     let _bomb = DoublePanic;
     panic!("{}", s);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReadySlot, WakerList};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, Weak};
+    use std::task::{Wake, Waker};
+
+    struct ReentrantParent {
+        list: Weak<Mutex<WakerList>>,
+        notifications: AtomicUsize,
+    }
+
+    impl Wake for ReentrantParent {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let list = self.list.upgrade().unwrap();
+            let mut list = list.lock().unwrap();
+            // SAFETY: The test owns this live one-slot list for the full access.
+            let node = unsafe { &*list.slice_start() };
+            // Fail promptly on the old code instead of spinning forever in pop.
+            assert!(
+                node.wake_lock.try_lock().is_some(),
+                "parent callback holds the child wake lock"
+            );
+            // SAFETY: This mutex guard provides the sole queue consumer.
+            assert!(matches!(unsafe { list.pop() }, ReadySlot::Ready((0, _))));
+            self.notifications.fetch_add(1, Ordering::Relaxed);
+            list.register(&Waker::from(Arc::clone(self)));
+        }
+    }
+
+    #[test]
+    fn parent_notification_can_reenter_the_ready_queue() {
+        let list = Arc::new(Mutex::new(WakerList::new(1)));
+        let parent = Arc::new(ReentrantParent {
+            list: Arc::downgrade(&list),
+            notifications: AtomicUsize::new(0),
+        });
+        let child = {
+            let mut list = list.lock().unwrap();
+            list.register(&Waker::from(Arc::clone(&parent)));
+            Waker::clone(&list.get(0))
+        };
+
+        child.wake_by_ref();
+        child.wake_by_ref();
+        child.wake();
+        assert_eq!(parent.notifications.load(Ordering::Relaxed), 3);
+    }
 }
